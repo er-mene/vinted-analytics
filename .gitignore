@@ -1,0 +1,13 @@
+# Ignore the Virtual Environment (junk files)
+venv/
+__pycache__/
+*.pyc
+
+# Ignore the Database (we don't want to share your local data)
+*.db
+
+# Ignore Mac system files
+.DS_Store
+
+# Ignore VS Code settings
+.vscode/
