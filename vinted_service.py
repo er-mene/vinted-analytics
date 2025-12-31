@@ -79,7 +79,7 @@ def search_vinted(query: str, brand_id: int = None, min_price: float = None, max
             clean_items.append(clean_item)
             
         except Exception as e:
-            # If a specific item fails, print why, but keep going!
+            # Skip invalid items and continue parsing
             print(f"⚠️ skipped item {item.get('id')} due to error: {e}")
             continue
             

@@ -24,7 +24,7 @@ def init_db():
         )
     ''')
     
-    # 2. Monitors Table (NEW - Saves your "Queries")
+    # 2. Monitors table: stores saved search configurations (monitors)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS monitors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,7 +38,7 @@ def init_db():
         )
     ''')
     
-    # 3. Daily Stats Table (NEW - Saves the History)
+    # 3. Daily stats table: stores daily aggregated history for monitors
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_stats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,8 +105,7 @@ def get_monitor_history(monitor_id):
 
 # Keep the existing save_listings function!
 def save_listings(items):
-    # (Paste your existing save_listings function here from the previous step)
-    # ...
+    """Save scraped listing items into the `listings` table. Returns count of new inserts."""
     if not items: return 0
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
