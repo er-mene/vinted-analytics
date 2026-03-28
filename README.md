@@ -55,6 +55,3 @@ Tracks individual items across multiple scans:
 
 * **Analytics Module**: SQL-based queries to visualize price distributions and "Likes vs. Sale Speed" correlations.
 * **Proxy Rotation**: Integration of a proxy pool to handle higher request volumes.
-
----
-*Note: This project is part of a software engineering learning path, focusing on system design, database integrity, and network protocols without the use of AI code generation.*
