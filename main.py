@@ -1,21 +1,25 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends 
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from typing import Optional, List
 import json
 import logging
-from database import create_monitor, get_monitor, log_stats, get_monitor_history, save_listings, get_monitors_list
+from database import init_db, create_monitor, get_monitor, save_listings, get_monitors_list, delete_monitor, scheduler
 from vinted_service import search_vinted
-from apscheduler.schedulers.background import BackgroundScheduler
 
-DB_NAME = "vinted_data.db"
 #TODO: grafico che mostra l'andamento del prezzo medio giornaliero e i nuovi annunci per un monitor specifico
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-
-scheduler = BackgroundScheduler()
-scheduler.add_jobstore("sqlalchemy", url=f"sqlite:///{DB_NAME}")
-scheduler.start()
 
 class MonitorCreate(BaseModel):
     name: str
@@ -41,6 +45,11 @@ def add_monitor(monitor: MonitorCreate = Depends()):
         monitor.name, monitor.query, monitor.brand_id, 
         monitor.min_price, monitor.max_price, monitor.status_ids
     )
+
+    #default interval
+    if (monitor.days == monitor.hours == monitor.minutes == monitor.seconds == 0): 
+        monitor.minutes = 10 
+    
     scheduler.add_job(run_monitor, "interval", days=monitor.days, hours=monitor.hours, 
                       minutes=monitor.minutes, seconds=monitor.seconds, args=[id], id=f"{id}")
     return {"message": "Monitor started", "monitor_id": id}
@@ -59,6 +68,7 @@ def resume_monitor(monitor_id: int):
     scheduler.resume_job(f"{monitor_id}")
     return {"message": "Monitor resumed", "monitor_id": monitor_id}
 
+@app.get("/monitor/{monitor_id}/run")
 def run_monitor(monitor_id: int):
     """
     Runs the specific monitor:
@@ -83,27 +93,33 @@ def run_monitor(monitor_id: int):
             max_price=m["max_price"],
             status_ids=status_ids
         )
-        
-        new_count = save_listings(items)
+
+        new_count = save_listings(monitor_id, items)
 
         avg_price = 0
         if items:
             total = sum(i['price'] for i in items)
             avg_price = round(total / len(items), 2)
         
-        log_stats(monitor_id, len(items), new_count)
-        
         return {
             "monitor": m["name"],
             "new_items_found": new_count,
             "current_avg_price": avg_price,
-            "total_active_scraped": len(items)
+            "total_active_scraped": len(items),
+            "items": items
         }
     except Exception as e:
         logger.exception(f"Job {monitor_id} failed: {e}")
         raise
 
-@app.get("/monitor/{monitor_id}/history")
-def view_history(monitor_id: int):
-    """Returns the chart data for this monitor."""
-    return get_monitor_history(monitor_id)
+@app.post("/monitor/delete")
+def delete_monitor_from_db(monitor_id: int):
+    delete_monitor(monitor_id)
+    scheduler.remove_job(monitor_id)
+    return {"message": f"Monitor {monitor_id} deleted"}
+
+def main():
+    pass
+
+if __name__ == "__main__": main()
+

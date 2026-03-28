@@ -1,7 +1,8 @@
-# Ignore the Virtual Environment (junk files)
 .venv/
 __pycache__/
 *.pyc
 *.db
 .DS_Store
 .vscode/
+*-wal
+*-shm

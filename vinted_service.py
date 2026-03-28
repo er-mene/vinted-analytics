@@ -61,8 +61,10 @@ def search_vinted(query: str, brand_id: int = None, min_price: float = None, max
                 "brand": item.get("brand_title"),
                 "price": float(price_info.get("amount", 0)), 
                 "url": item.get("url"),
-                "status": item.get("status"),
+                "status_id": item.get("status"),
+                "likes": int(item.get("favourite_count", 0)),
                 "listed_at": listing_date,
+                "has_been_promoted": 1 if item.get("promoted") else 0
             }
             clean_items.append(clean_item)
             

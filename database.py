@@ -1,23 +1,32 @@
 import sqlite3
 import json
 from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
 
 DB_NAME = "vinted_data.db"
+scheduler = BackgroundScheduler()
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    scheduler.add_jobstore("sqlalchemy", url=f"sqlite:///{DB_NAME}")
     cursor = conn.cursor()
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS listings (
-            id INTEGER PRIMARY KEY,
+            id INTEGER,
+            monitor_id INTEGER REFERENCES monitors(id) ON DELETE CASCADE,
             title TEXT,
             brand TEXT,
             price REAL,
             url TEXT,
             status_id INTEGER,
+            is_active INTEGER,      -- boolean
             likes INTEGER,
-            listed_at TIMESTAMP
+            listed_at TIMESTAMP,
+            sold_at TIMESTAMP,
+            has_been_promoted INTEGER, -- boolean
+            PRIMARY KEY (id, monitor_id)
         )
     ''')
     
@@ -30,17 +39,6 @@ def init_db():
             min_price REAL,
             max_price REAL,
             status_ids TEXT     -- We store list "[6, 1]" as a string
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            monitor_id INTEGER,
-            date DATETIME,
-            total_listings_count INTEGER,
-            new_listings_count INTEGER,
-            FOREIGN KEY(monitor_id) REFERENCES monitors(id)
         )
     ''')
     
@@ -74,28 +72,6 @@ def get_monitor(monitor_id):
     conn.close()
     return dict(row) if row else None
 
-def log_stats(monitor_id, total_count, new_count):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    now = datetime.now()
-    
-    cursor.execute('''
-        INSERT INTO stats (monitor_id, date, total_listings_count, new_listings_count)
-        VALUES (?, ?, ?, ?)
-    ''', (monitor_id, now, total_count, new_count))
-
-    conn.commit()
-    conn.close()
-
-def get_monitor_history(monitor_id):
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM stats WHERE monitor_id = ? ORDER BY date DESC", (monitor_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
 def get_monitors_list():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
@@ -105,26 +81,39 @@ def get_monitors_list():
     conn.close()
     return [dict(r) for r in rows]
 
-def save_listings(items):
+def save_listings(monitor_id, items):
     """Save scraped listing items into the `listings` table. Returns count of new inserts."""
     if not items: return 0
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     new_count = 0
-    
+
+    items_id = [item['id'] for item in items]
+    placeholders = ', '.join(['?'] * len(items_id))
+
+    cursor.execute(f'''
+        UPDATE listings
+        SET is_active = 0, sold_at = ?
+        WHERE monitor_id = ? AND id NOT IN ({placeholders})
+    ''', (datetime.now(), monitor_id, *items_id)
+    )
+
     for item in items:
-        try:
-            cursor.execute('''
-                INSERT OR IGNORE INTO listings 
-                (id, title, brand, price, url, status_id, likes, listed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                item['id'], item['title'], item['brand'], item['price'], 
-                item['url'], item.get('status_id'), item.get('likes', 0),  item.get('listed_at')
-            ))
-            if cursor.rowcount > 0: new_count += 1
-        except Exception as e:
-            pass
+        cursor.execute('''
+            INSERT INTO listings 
+            (id, monitor_id, title, brand, price, url, status_id, is_active, likes, listed_at, has_been_promoted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id, monitor_id) DO UPDATE SET
+            price = excluded.price,
+            likes = excluded.likes,
+            is_active = 1,
+            sold_at = null,
+            has_been_promoted = MAX(listings.has_been_promoted, excluded.has_been_promoted)
+        ''', (
+            item['id'], monitor_id, item['title'], item['brand'], item['price'], item['url'],
+            item.get('status_id'), 1, item.get('likes'),  item.get('listed_at'), item.get('has_been_promoted')
+        ))
+        if cursor.rowcount > 0: new_count += 1
             
     conn.commit()
     conn.close()
@@ -144,4 +133,12 @@ def clear_data(monitors: bool = False, listings: bool = True, daily_stats:bool =
         print("Daily stats table clear")
     conn.commit()
     conn.execute("VACUUM")
+    conn.close()
+
+def delete_monitor(monitor_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute('''PRAGMA foreign_keys = ON;''')
+    cursor = conn.cursor()
+    cursor.execute('''DELETE FROM monitors WHERE id = ?''', (monitor_id,))
+    conn.commit()
     conn.close()
