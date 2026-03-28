@@ -1,62 +1,60 @@
-# 📈 Vinted Market Intelligence Engine
+# Vinted Monitor & Analytics Engine
 
-![Status](https://img.shields.io/badge/Status-Active_Development-yellow) ![Python](https://img.shields.io/badge/Python-3.11+-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.95+-green)
-
-> **Note:** This project is currently under active development as part of a portfolio initiative to engineer real-time market analytics tools.
-
-## 💡 Overview
-
-The **Vinted Market Intelligence Engine** is a backend data engineering tool designed to aggregate, store, and analyze secondary market data. Unlike standard keyword search, this tool persists historical listing data to identify **arbitrage opportunities**, calculate **price volatility**, and track **supply velocity** for specific high-value assets (e.g., luxury watches, electronics).
-
-It solves the problem of ephemeral market data by building a local data warehouse of listings, allowing for longitudinal analysis and "Deal Scoring" based on historical medians rather than current asking prices.
+A modular Python-based tool designed to track Vinted listings in real-time, monitor price fluctuations, and collect historical data for sales trend analysis.
 
 ## 🚀 Key Features
 
-* **Stealth Data Ingestion:** Implements `curl_cffi` to mimic browser TLS fingerprints (JA3), successfully bypassing Cloudflare 403/401 protections to access private API endpoints.
-* **Idempotent Storage:** Custom SQLite persistence layer with primary key constraints to prevent data duplication during repeated scrape cycles.
-* **Market Analytics:**
-    * **Volatility Index:** Calculates standard deviation of prices to measure asset stability.
-    * **Arbitrage Detection:** Automatically flags listings priced >30% below the historical market median.
-* **Dynamic Monitoring:** "Cron-style" monitoring system to track specific brand/model combinations over time.
+* **Automated Background Scraper**: Utilizes `APScheduler` to run multiple search monitors concurrently at user-defined intervals.
+* **Intelligent Data Persistence**: Uses SQLite with **Write-Ahead Logging (WAL)** to handle concurrent read/write operations efficiently.
+* **Anti-Bot Bypass**: Implements `curl_cffi` with Safari impersonation to mimic browser fingerprints and avoid TLS-based blocking.
+* **Tracking Logic**: 
+    * **Upsert System**: New items are inserted, while existing ones have their price and likes updated.
+    * **Automated Sold Detection**: Items no longer appearing in search results are marked as inactive (`is_active = 0`) and assigned a `sold_at` timestamp.
+    * **Sticky Promotion Flag**: Features a persistent "promoted" status to track if an item was boosted at any point during its listing.
 
-## 🛠️ Tech Stack
+## 🛠 Tech Stack
 
-* **Core:** Python 3.x
-* **API Framework:** FastAPI (Asynchronous, Type-safe)
-* **Data Processing:** Pandas (Vectorized operations for price stats)
-* **Database:** SQLite (Lightweight relational storage)
-* **Networking:** curl_cffi (Advanced HTTP client for browser impersonation)
+* **Framework**: FastAPI (Asynchronous API management).
+* **Database**: SQLite (Relational storage for monitors and listings).
+* **Task Scheduling**: APScheduler (Background job management).
+* **HTTP Client**: `curl_cffi` (Advanced scraping and browser impersonation).
 
-## ⚡ Quick Start
+## 📂 Project Structure
 
-### Prerequisites
-* Python 3.10+
-* Virtual Environment (Recommended)
+* **`main.py`**: The entry point. Manages the FastAPI application lifespan, defines REST endpoints, and orchestrates the scheduler.
+* **`database.py`**: The data layer. Handles table creation, CRUD operations for monitors, and the logic for saving/updating listings.
+* **`vinted_service.py`**: The networking layer. Manages session/cookie acquisition and interacts with the Vinted API to fetch raw item data.
 
-### Installation
-1.  **Clone the repository:**
-    ```bash
-    git clone [https://github.com/er-mene/vinted-analytics.git](https://github.com/YOUR_NEW_USERNAME/vinted-analytics.git)
-    cd vinted-analytics
-    ```
+## 📊 Database Schema
 
-2.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+### Monitors Table
+Stores search configurations:
+* `query`: Search keywords.
+* `min_price` / `max_price`: Budget filters.
+* `status_ids`: Filter for item condition.
 
-3.  **Initialize the Database:**
-    ```bash
-    python -c "from database import init_db; init_db()"
-    ```
+### Listings Table
+Tracks individual items across multiple scans:
+* `id` & `monitor_id`: Composite Primary Key to track items uniquely across different monitors.
+* `is_active`: Boolean indicating if the item is currently for sale.
+* `has_been_promoted`: Tracks if the item was ever featured via paid promotion.
+* `listed_at` / `sold_at`: Timestamps used to calculate the **Average Time to Sell**.
 
-4.  **Run the Server:**
-    ```bash
-    uvicorn main:app --reload
-    ```
+## 🔌 API Endpoints
 
-5.  **Explore the API:**
-    Open your browser to `http://127.0.0.1:8000/docs` to see the Swagger UI.
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/` | Returns a list of all existing monitors. |
+| `POST` | `/monitor` | Creates a new monitor and schedules the background job. |
+| `PATCH` | `/monitor/stop` | Pauses a specific background monitor. |
+| `PATCH` | `/monitor/resume` | Resumes a paused monitor. |
+| `POST` | `/monitor/delete` | Deletes a monitor and its associated data from the DB. |
+| `GET` | `/monitor/{monitor_id}/run` | Runs a monitor and returns the average price and the items found. |
 
-## ⚖️ Disclaimer
-This tool is developed for **educational purposes only** to demonstrate data engineering and API development skills. It is not intended for commercial scraping or to violate Vinted's Terms of Service.
+## 📈 Future Roadmap
+
+* **Analytics Module**: SQL-based queries to visualize price distributions and "Likes vs. Sale Speed" correlations.
+* **Proxy Rotation**: Integration of a proxy pool to handle higher request volumes.
+
+---
+*Note: This project is part of a software engineering learning path, focusing on system design, database integrity, and network protocols without the use of AI code generation.*
