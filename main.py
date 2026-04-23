@@ -39,7 +39,7 @@ def show_monitors():
     return get_monitors_list()
 
 @app.post("/monitor")
-def add_monitor(monitor: MonitorCreate = Depends()):
+def add_monitor(monitor: MonitorCreate):
     """Creates a new tracked search."""
     id = create_monitor(
         monitor.name, monitor.query, monitor.brand_id, 
@@ -117,9 +117,4 @@ def delete_monitor_from_db(monitor_id: int):
     delete_monitor(monitor_id)
     scheduler.remove_job(monitor_id)
     return {"message": f"Monitor {monitor_id} deleted"}
-
-def main():
-    pass
-
-if __name__ == "__main__": main()
 
