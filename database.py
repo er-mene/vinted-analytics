@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import pandas as pd
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -142,3 +143,9 @@ def delete_monitor(monitor_id: int):
     cursor.execute('''DELETE FROM monitors WHERE id = ?''', (monitor_id,))
     conn.commit()
     conn.close()
+
+def get_listings_df(monitor_id):
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql_query("SELECT * FROM listings WHERE monitor_id = ?", conn, params=(monitor_id,))
+    conn.close()
+    return df

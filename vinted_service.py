@@ -2,6 +2,7 @@
 from curl_cffi import requests
 from datetime import datetime
 from typing import List
+from analytics import save_graph
 
 def search_vinted(query: str, brand_id: int = None, min_price: float = None, max_price: float = None, status_ids: List[int] = None):
     session = requests.Session(impersonate="safari")
@@ -74,4 +75,5 @@ def search_vinted(query: str, brand_id: int = None, min_price: float = None, max
             continue
             
     print(f"🏁 Finished parsing. Returning {len(clean_items)} valid items.")
+    save_graph(query, clean_items)
     return clean_items
