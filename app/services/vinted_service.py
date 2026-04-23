@@ -1,10 +1,24 @@
-# vinted_service.py
+from enum import Enum
 from curl_cffi import requests
 from datetime import datetime
 from typing import List
+from bs4 import BeautifulSoup
+
+_shared_session = None
+
+def get_vinted_session():
+    """
+    Returns a session object with necessary Vinted cookies.
+    Initializes a new session if one does not exist.
+    """
+    global _shared_session
+    if _shared_session is None:
+        _shared_session = requests.Session(impersonate="safari")
+        _shared_session.get("https://www.vinted.it")
+    return _shared_session
 
 def search_vinted(query: str, brand_id: int = None, min_price: float = None, max_price: float = None, status_ids: List[int] = None):
-    session = requests.Session(impersonate="safari")
+    session = get_vinted_session()
 
     print(f"🕵️  Scraping Vinted for: {query}...")
 
@@ -75,3 +89,29 @@ def search_vinted(query: str, brand_id: int = None, min_price: float = None, max
             
     print(f"🏁 Finished parsing. Returning {len(clean_items)} valid items.")
     return clean_items
+
+class ItemStatus(Enum):
+    ACTIVE = "active"
+    SOLD = "sold"
+    REMOVED = "removed"
+    ERROR = "error"
+
+def check_item_status(url: str) -> ItemStatus:
+    session = get_vinted_session()
+
+    try:
+        response = session.get(url)
+    except Exception as e:
+        return ItemStatus.ERROR
+    
+    if response.status_code == 404:
+        return ItemStatus.REMOVED
+    
+    soup = BeautifulSoup(response.text, "html_parser")
+    if soup.find(attrs={"data-testid": "item-status—content"}):
+        return ItemStatus.SOLD
+    
+    return ItemStatus.ACTIVE
+
+
+    

@@ -19,7 +19,7 @@ def init_db():
             title TEXT,
             brand TEXT,
             price REAL,
-            url TEXT,
+            url TEXT UNIQUE,
             status_id INTEGER,
             is_active INTEGER,      -- boolean
             likes INTEGER,
@@ -39,6 +39,15 @@ def init_db():
             min_price REAL,
             max_price REAL,
             status_ids TEXT     -- We store list "[6, 1]" as a string
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS verification_queue (
+            id INTEGER PRIMARY KEY,
+            url TEXT UNIQUE,
+            queued_at TIMESTAMP,
+            last_check TIMESTAMP
         )
     ''')
     
@@ -92,10 +101,13 @@ def save_listings(monitor_id, items):
     placeholders = ', '.join(['?'] * len(items_id))
 
     cursor.execute(f'''
-        UPDATE listings
-        SET is_active = 0, sold_at = ?
-        WHERE monitor_id = ? AND id NOT IN ({placeholders})
-    ''', (datetime.now(), monitor_id, *items_id)
+        INSERT INTO verification_queue(id, url, queued_at, last_check)
+        SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        FROM listings
+        WHERE is_active = 1 AND id NOT IN ({placeholders})
+        ON CONFLICT(id) DO UPDATE SET
+        last_check = CURRENT_TIMESTAMP
+    ''', items_id
     )
 
     for item in items:
@@ -119,7 +131,7 @@ def save_listings(monitor_id, items):
     conn.close()
     return new_count
 
-def clear_data(monitors: bool = False, listings: bool = True, daily_stats:bool = True):
+def clear_data(monitors: bool = False, listings: bool = True, daily_stats: bool = True):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     if monitors:
