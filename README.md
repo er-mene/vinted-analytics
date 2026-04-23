@@ -11,6 +11,7 @@ A modular Python-based tool designed to track Vinted listings in real-time, moni
     * **Upsert System**: New items are inserted, while existing ones have their price and likes updated.
     * **Automated Sold Detection**: Items no longer appearing in search results are marked as inactive (`is_active = 0`) and assigned a `sold_at` timestamp.
     * **Sticky Promotion Flag**: Features a persistent "promoted" status to track if an item was boosted at any point during its listing.
+* **Analytics & Visualization**: Generates market insights, including price distributions, correlations between likes and pricing, and historical sales trends.
 
 ## 🛠 Tech Stack
 
@@ -24,6 +25,7 @@ A modular Python-based tool designed to track Vinted listings in real-time, moni
 * **`main.py`**: The entry point. Manages the FastAPI application lifespan, defines REST endpoints, and orchestrates the scheduler.
 * **`database.py`**: The data layer. Handles table creation, CRUD operations for monitors, and the logic for saving/updating listings.
 * **`vinted_service.py`**: The networking layer. Manages session/cookie acquisition and interacts with the Vinted API to fetch raw item data.
+* **`analytics.py`**: The visualization engine. Generates plots for market trends, price distributions, and sales metrics.
 
 ## 📊 Database Schema
 
