@@ -1,57 +1,134 @@
-# Vinted Monitor & Analytics Engine
+# Vinted Monitor and Analytics
 
-A modular Python-based tool designed to track Vinted listings in real-time, monitor price fluctuations, and collect historical data for sales trend analysis.
+FastAPI service for tracking Vinted search results, storing listing history in SQLite, verifying listings in the background, and exposing simple analytics charts.
 
-## 🚀 Key Features
+## What It Does
 
-* **Automated Background Scraper**: Utilizes `APScheduler` to run multiple search monitors concurrently at user-defined intervals.
-* **Intelligent Data Persistence**: Uses SQLite with **Write-Ahead Logging (WAL)** to handle concurrent read/write operations efficiently.
-* **Anti-Bot Bypass**: Implements `curl_cffi` with Safari impersonation to mimic browser fingerprints and avoid TLS-based blocking.
-* **Tracking Logic**: 
-    * **Upsert System**: New items are inserted, while existing ones have their price and likes updated.
-    * **Automated Sold Detection**: Items no longer appearing in search results are marked as inactive (`is_active = 0`) and assigned a `sold_at` timestamp.
-    * **Sticky Promotion Flag**: Features a persistent "promoted" status to track if an item was boosted at any point during its listing.
+- Creates search monitors for Vinted queries.
+- Runs each monitor on a schedule with APScheduler.
+- Stores listings in SQLite.
+- Keeps a background verification queue to detect removed and sold items.
+- Exposes analytics for price history, price/likes correlation, and price/time-to-sell correlation.
+- Includes a built-in dashboard page rendered directly by the API.
 
-## 🛠 Tech Stack
+## Current Behavior
 
-* **Framework**: FastAPI (Asynchronous API management).
-* **Database**: SQLite (Relational storage for monitors and listings).
-* **Task Scheduling**: APScheduler (Background job management).
-* **HTTP Client**: `curl_cffi` (Advanced scraping and browser impersonation).
+- Monitor jobs start immediately after creation.
+- Monitor frequency has a minimum interval of 30 minutes.
+- If no interval is provided, the request defaults to 10 minutes, then is clamped to the 30-minute minimum.
+- A background verification worker runs for the whole lifetime of the server.
+- The verification worker checks queued listings, removes disappeared items, and marks sold items with `sold_at`.
 
-## 📂 Project Structure
+## Stack
 
-* **`main.py`**: The entry point. Manages the FastAPI application lifespan, defines REST endpoints, and orchestrates the scheduler.
-* **`database.py`**: The data layer. Handles table creation, CRUD operations for monitors, and the logic for saving/updating listings.
-* **`vinted_service.py`**: The networking layer. Manages session/cookie acquisition and interacts with the Vinted API to fetch raw item data.
+- FastAPI
+- APScheduler
+- SQLite
+- curl_cffi
+- BeautifulSoup
 
-## 📊 Database Schema
+## Project Layout
 
-### Monitors Table
-Stores search configurations:
-* `query`: Search keywords.
-* `min_price` / `max_price`: Budget filters.
-* `status_ids`: Filter for item condition.
+- [main.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/main.py): app startup, scheduler startup, verification worker lifecycle.
+- [app/api/endpoints.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/app/api/endpoints.py): API routes, monitor scheduling, analytics JSON, dashboard HTML.
+- [app/db/database.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/app/db/database.py): schema creation and all database operations.
+- [app/services/vinted_service.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/app/services/vinted_service.py): Vinted requests and item status checks.
+- [app/tasks/verification_worker.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/app/tasks/verification_worker.py): background verification loop.
 
-### Listings Table
-Tracks individual items across multiple scans:
-* `id` & `monitor_id`: Composite Primary Key to track items uniquely across different monitors.
-* `is_active`: Boolean indicating if the item is currently for sale.
-* `has_been_promoted`: Tracks if the item was ever featured via paid promotion.
-* `listed_at` / `sold_at`: Timestamps used to calculate the **Average Time to Sell**.
+## Database
 
-## 🔌 API Endpoints
+### `monitors`
+
+Stores one saved search per row.
+
+Important fields:
+- `id`
+- `name`
+- `query`
+- `brand_id`
+- `min_price`
+- `max_price`
+- `status_ids`
+
+### `listings`
+
+Stores scraped listing snapshots keyed by `(id, monitor_id)`.
+
+Important fields:
+- `id`
+- `monitor_id`
+- `title`
+- `brand`
+- `price`
+- `url`
+- `likes`
+- `is_active`
+- `listed_at`
+- `sold_at`
+- `has_been_promoted`
+
+### `verification_queue`
+
+Stores listing ids that still need background verification.
+
+Important fields:
+- `id`
+- `url`
+- `queued_at`
+- `last_check`
+
+## API
+
+All routes are mounted under `/api`.
 
 | Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/` | Returns a list of all existing monitors. |
-| `POST` | `/monitor` | Creates a new monitor and schedules the background job. |
-| `PATCH` | `/monitor/stop` | Pauses a specific background monitor. |
-| `PATCH` | `/monitor/resume` | Resumes a paused monitor. |
-| `POST` | `/monitor/delete` | Deletes a monitor and its associated data from the DB. |
-| `GET` | `/monitor/{monitor_id}/run` | Runs a monitor and returns the average price and the items found. |
+| --- | --- | --- |
+| `GET` | `/api/` | List all monitors |
+| `POST` | `/api/monitor` | Create a monitor and schedule it |
+| `PATCH` | `/api/monitor/stop` | Pause one monitor job |
+| `PATCH` | `/api/monitor/resume` | Resume one monitor job |
+| `POST` | `/api/monitor/delete` | Delete one monitor and remove its job |
+| `GET` | `/api/monitor/{monitor_id}/run` | Run one monitor immediately |
+| `GET` | `/api/monitor/{monitor_id}/analytics` | Return analytics JSON |
+| `GET` | `/api/monitor/{monitor_id}/dashboard` | Show the built-in charts page |
 
-## 📈 Future Roadmap
+## Analytics
 
-* **Improve Sold Items Handling**: Refactor the logic for detecting and marking sold items to improve accuracy and robustness.
-* **Analytics Module**: SQL-based queries to visualize price distributions and "Likes vs. Sale Speed" correlations.
+The analytics endpoint currently returns:
+
+- monitor summary
+- price history grouped by day
+- listing-level price and likes points
+- sold listing points with hours-to-sell
+- Pearson correlations for:
+  - price vs likes
+  - price vs time to sell
+
+The dashboard visualizes:
+
+- price distribution over time
+- price / likes correlation
+- price / time-to-sell correlation
+
+Note: the sell-time chart will be empty until some listings are marked as sold.
+
+## Running Locally
+
+Install dependencies and start the API:
+
+```bash
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
+
+Then open:
+
+- `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/api/monitor/1/dashboard`
+
+## Notes
+
+- The scraper can trigger rate limits or blocking if used too aggressively.
+- The 30-minute minimum interval was added to reduce request pressure.
+- The verification worker uses random per-item delays, but it still contributes traffic.
+- This project currently uses SQLite and a local file `vinted_data.db`.
