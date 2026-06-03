@@ -128,7 +128,10 @@ Then open:
 
 ## Notes
 
-- The scraper can trigger rate limits or blocking if used too aggressively.
+- The scraper uses Vinted's default page size (typically 48 items) and paginates through multiple pages with configurable delays between requests to reduce rate-limiting risk.
+- A `jitter=300` (5 min) is applied to scheduled monitor intervals so they don't fire at exact clockwork intervals.
+- The `max_pages` parameter (default: unlimited) caps how many pages are fetched per monitor run. Lowering this reduces request volume.
+- The `page_delay_seconds` parameter (default: 4.0) controls the base delay between page requests. Actual delay varies by ±30% per request.
 - The 30-minute minimum interval was added to reduce request pressure.
 - The verification worker uses random per-item delays, but it still contributes traffic.
 - This project currently uses SQLite and a local file `vinted_data.db`.

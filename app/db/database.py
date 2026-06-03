@@ -33,12 +33,14 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS monitors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,            -- e.g. "Apple Pencil Monitor"
+            name TEXT,
             query TEXT,
             brand_id INTEGER,
             min_price REAL,
             max_price REAL,
-            status_ids TEXT     -- We store list "[6, 1]" as a string
+            status_ids TEXT,
+            max_pages INTEGER,
+            page_delay_seconds REAL DEFAULT 4.0
         )
     ''')
 
@@ -55,17 +57,16 @@ def init_db():
     conn.close()
 
 
-def create_monitor(name, query, brand_id, min_price, max_price, status_ids = []):
+def create_monitor(name, query, brand_id, min_price, max_price, status_ids=[], max_pages=None, page_delay_seconds=4.0):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Convert list [6, 1] to string "[6, 1]" for SQLite
     status_str = json.dumps(status_ids) if status_ids else "[]"
     
     cursor.execute('''
-        INSERT INTO monitors (name, query, brand_id, min_price, max_price, status_ids)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (name, query, brand_id, min_price, max_price, status_str))
+        INSERT INTO monitors (name, query, brand_id, min_price, max_price, status_ids, max_pages, page_delay_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (name, query, brand_id, min_price, max_price, status_str, max_pages, page_delay_seconds))
     
     monitor_id = cursor.lastrowid
     conn.commit()

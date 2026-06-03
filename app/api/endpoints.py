@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 import json
 import logging
+import threading
 from datetime import datetime
 from app.db.database import (
     create_monitor,
@@ -19,6 +20,16 @@ from app.services.vinted_service import search_vinted
 router = APIRouter()
 logger = logging.getLogger(__name__)
 MIN_MONITOR_INTERVAL_SECONDS = 30 * 60
+
+_run_locks: dict[int, threading.Lock] = {}
+_run_locks_guard = threading.Lock()
+
+
+def _monitor_lock(monitor_id: int) -> threading.Lock:
+    with _run_locks_guard:
+        if monitor_id not in _run_locks:
+            _run_locks[monitor_id] = threading.Lock()
+        return _run_locks[monitor_id]
 
 
 def _normalize_monitor_interval(days: int, hours: int, minutes: int, seconds: int) -> tuple[int, int, int, int]:
@@ -352,6 +363,8 @@ class MonitorCreate(BaseModel):
     hours: int = 0
     minutes: int = 0
     seconds: int = 0
+    max_pages: Optional[int] = None
+    page_delay_seconds: float = 4.0
 
 @router.get("/")
 def show_monitors():
@@ -363,7 +376,8 @@ def add_monitor(monitor: MonitorCreate):
     """Creates a new tracked search."""
     id = create_monitor(
         monitor.name, monitor.query, monitor.brand_id, 
-        monitor.min_price, monitor.max_price, monitor.status_ids
+        monitor.min_price, monitor.max_price, monitor.status_ids,
+        monitor.max_pages, monitor.page_delay_seconds,
     )
 
     interval_days, interval_hours, interval_minutes, interval_seconds = _normalize_monitor_interval(
@@ -384,6 +398,8 @@ def add_monitor(monitor: MonitorCreate):
         id=str(id),
         replace_existing=True,
         next_run_time=datetime.now(),
+        jitter=300,
+        max_instances=1,
     )
     return {
         "message": "Monitor started",
@@ -417,12 +433,19 @@ def run_monitor(monitor_id: int):
     """
     Runs the specific monitor
     """
+    lock = _monitor_lock(monitor_id)
+    if not lock.acquire(blocking=False):
+        msg = f"Monitor {monitor_id} is already running, skipping this invocation"
+        logger.warning(msg)
+        return {"message": msg}
     try:
         m = get_monitor(monitor_id)
         if not m:
             raise HTTPException(status_code=404, detail="Monitor not found")
             
         status_ids = json.loads(m["status_ids"])
+        max_pages = m.get("max_pages")
+        page_delay_seconds = m.get("page_delay_seconds") or 4.0
         
         print(f"🔄 Running Monitor: {m['name']}...")
         items = search_vinted(
@@ -430,7 +453,9 @@ def run_monitor(monitor_id: int):
             brand_id=m["brand_id"],
             min_price=m["min_price"],
             max_price=m["max_price"],
-            status_ids=status_ids
+            status_ids=status_ids,
+            max_pages=max_pages,
+            page_delay_seconds=page_delay_seconds,
         )
 
         new_count = save_listings(monitor_id, items)
@@ -450,6 +475,8 @@ def run_monitor(monitor_id: int):
     except Exception as e:
         logger.exception(f"Job {monitor_id} failed: {e}")
         raise
+    finally:
+        lock.release()
 
 
 @router.get("/monitor/{monitor_id}/analytics")
