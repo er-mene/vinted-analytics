@@ -103,10 +103,8 @@ def check_item_status(url: str) -> ItemStatus:
         response = session.get(url)
     except Exception as e:
         return ItemStatus.ERROR
-    if response.status_code == 403:
+    if response.status_code >= 400:
         return ItemStatus.ERROR
-    if response.status_code == 404:
-        return ItemStatus.REMOVED
 
     try:
         soup = BeautifulSoup(response.text, "html.parser")
