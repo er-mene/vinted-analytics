@@ -2,7 +2,7 @@ import time
 import random
 import logging
 import threading
-from app.db.database import get_items_to_verify, mark_item_as_sold, clear_queue, delete_listing
+from app.db.database import get_items_to_verify, mark_item_as_sold, clear_queue, delete_listing, delete_from_queue
 from app.services.vinted_service import check_item_status, ItemStatus
 
 MAX_BATCH_SIZE = 10
@@ -57,6 +57,9 @@ class VerificationWorker:
                         logging.info("Listing %s marked as sold.", item["id"])
                     elif status == ItemStatus.ERROR:
                         logging.warning("Verification failed for listing %s.", item["id"])
+                    elif status == ItemStatus.ACTIVE:
+                        delete_from_queue(item["id"])
+                        logging.info("Listing %s verified active – removed from queue.", item["id"])
                     time.sleep(random.uniform(10, 15))
             except Exception:
                 logging.exception("Verification worker loop failed.")

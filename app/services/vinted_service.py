@@ -1,23 +1,19 @@
 import random
 import time
+import threading
 from enum import Enum
 from curl_cffi import requests
 from datetime import datetime
 from typing import List
 from bs4 import BeautifulSoup
 
-_shared_session = None
+_session_local = threading.local()
 
 def get_vinted_session():
-    """
-    Returns a session object with necessary Vinted cookies.
-    Initializes a new session if one does not exist.
-    """
-    global _shared_session
-    if _shared_session is None:
-        _shared_session = requests.Session(impersonate="safari")
-        _shared_session.get("https://www.vinted.it")
-    return _shared_session
+    if not hasattr(_session_local, "session"):
+        _session_local.session = requests.Session(impersonate="safari")
+        _session_local.session.get("https://www.vinted.it")
+    return _session_local.session
 
 def _parse_item(item):
     price_info = item.get("total_item_price") or {}
@@ -78,6 +74,7 @@ def search_vinted(
             response = session.get(
                 "https://www.vinted.it/api/v2/catalog/items",
                 params={**params, "page": page_num},
+                timeout=30,
             )
         except Exception as e:
             print(f"❌ Connection Error (API page {page_num}): {e}")
@@ -166,7 +163,7 @@ def check_item_status(url: str) -> ItemStatus:
     session = get_vinted_session()
 
     try:
-        response = session.get(url)
+        response = session.get(url, timeout=30)
     except Exception as e:
         return ItemStatus.ERROR
     if response.status_code >= 400:

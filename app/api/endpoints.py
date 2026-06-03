@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import json
@@ -13,6 +13,11 @@ from app.db.database import (
     get_monitors_list,
     delete_monitor,
     get_monitor_analytics,
+    get_monitors_with_stats,
+    get_verification_queue_summary,
+    get_verification_queue_items,
+    get_recent_items,
+    update_monitor_last_scrape,
     scheduler,
 )
 from app.services.vinted_service import search_vinted
@@ -459,6 +464,7 @@ def run_monitor(monitor_id: int):
         )
 
         new_count = save_listings(monitor_id, items)
+        update_monitor_last_scrape(monitor_id)
 
         avg_price = 0
         if items:
@@ -514,3 +520,453 @@ def delete_monitor_from_db(monitor_id: int):
     delete_monitor(monitor_id)
     scheduler.remove_job(str(monitor_id))
     return {"message": f"Monitor {monitor_id} deleted"}
+
+
+# ── JSON endpoints ──────────────────────────────────────────────────────────
+
+
+@router.get("/overview")
+def overview():
+    monitors = get_monitors_with_stats()
+    jobs = {j.id: j for j in scheduler.get_jobs()}
+    for m in monitors:
+        j = jobs.get(str(m["id"]))
+        m["next_run_time"] = str(j.next_run_time) if j and j.next_run_time else None
+        m["paused"] = j and j.next_run_time is None
+    return JSONResponse(
+        {"monitors": monitors, "queue": get_verification_queue_summary()},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@router.get("/queue")
+def queue_items():
+    summary = get_verification_queue_summary()
+    items = get_verification_queue_items(limit=100)
+    return JSONResponse(
+        {**summary, "items": items},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@router.get("/monitor/{monitor_id}/top")
+def monitor_top_items(monitor_id: int):
+    if not get_monitor(monitor_id):
+        raise HTTPException(status_code=404, detail="Monitor not found")
+    return JSONResponse(
+        get_recent_items(monitor_id, limit=10),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+# ── HTML helpers ─────────────────────────────────────────────────────────────
+
+
+def _build_overview_html() -> str:
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vinted Analytics · Dashboard</title>
+  <style>
+    :root {
+      --bg: #f3efe7;
+      --panel: #fffaf3;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --accent: #b45309;
+      --accent-2: #0f766e;
+      --line: #e5dccf;
+      --green: #059669;
+      --red: #dc2626;
+      --yellow: #d97706;
+      --radius: 18px;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(180,83,9,0.12), transparent 28%),
+        radial-gradient(circle at top right, rgba(15,118,110,0.10), transparent 30%),
+        linear-gradient(180deg, #f7f2ea 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1280px; margin: 0 auto; padding: 24px 20px 48px; }
+
+    /* nav */
+    .nav {
+      display: flex; gap: 24px; align-items: center;
+      padding: 14px 0; margin-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .nav a {
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      font-size: 0.95rem; color: var(--muted); text-decoration: none;
+    }
+    .nav a:hover { color: var(--ink); }
+    .nav .brand {
+      font-family: Georgia, serif; font-size: 1.2rem;
+      font-weight: 700; color: var(--accent); margin-right: auto;
+    }
+    .nav .active { color: var(--ink); font-weight: 600; }
+
+    /* cards */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px; margin-bottom: 24px;
+    }
+    .card {
+      background: rgba(255,250,243,0.92);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 10px 30px rgba(31,41,55,0.05);
+      backdrop-filter: blur(6px);
+      padding: 16px 18px;
+    }
+    .label {
+      font-size: 0.8rem; color: var(--muted);
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .value { margin-top: 6px; font-size: 1.8rem; font-weight: 700; }
+
+    /* table */
+    .table-wrap {
+      background: rgba(255,250,243,0.92);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 10px 30px rgba(31,41,55,0.05);
+      backdrop-filter: blur(6px);
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      text-align: left; padding: 12px 14px;
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      font-size: 0.8rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      border-bottom: 1px solid var(--line);
+      background: rgba(229,220,207,0.2);
+    }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 0.95rem; }
+    tr:last-child td { border-bottom: none; }
+
+    /* badges */
+    .badge {
+      display: inline-block; padding: 2px 10px; border-radius: 999px;
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      font-size: 0.8rem; font-weight: 600;
+    }
+    .badge-green { background: #d1fae5; color: var(--green); }
+    .badge-red { background: #fce4e4; color: var(--red); }
+    .badge-yellow { background: #fef3c7; color: var(--yellow); }
+    .badge-gray { background: #e5e7eb; color: var(--muted); }
+
+    .actions a {
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      font-size: 0.82rem; color: var(--accent-2); text-decoration: none;
+      margin-right: 8px;
+    }
+    .actions a:hover { text-decoration: underline; }
+
+    .empty {
+      padding: 48px; text-align: center; color: var(--muted);
+      font-family: "Helvetica Neue", Arial, sans-serif;
+    }
+    .section-title {
+      margin: 28px 0 12px; font-size: 1.3rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <nav class="nav">
+      <span class="brand">Vinted Analytics</span>
+      <a href="/api/dashboard" class="active">Dashboard</a>
+      <a href="/api/queue/dashboard">Queue</a>
+    </nav>
+
+    <section class="cards" id="summary-cards"></section>
+
+    <h2 class="section-title">Monitors</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Query</th>
+            <th>Schedule</th>
+            <th>Last Scrape</th>
+            <th>Listings</th>
+            <th>Avg Price</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="monitors-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <script>
+    (async () => {
+      const resp = await fetch("/api/overview?_=" + Date.now());
+      if (!resp.ok) { document.body.innerHTML = '<div class="shell"><p class="empty">Failed to load data.</p></div>'; return; }
+      const data = await resp.json();
+
+      // summary cards
+      const totalMon = data.monitors.length;
+      const totalList = data.monitors.reduce((s, m) => s + (m.active_listings || 0), 0);
+      document.getElementById("summary-cards").innerHTML = [
+        ["Monitors", totalMon],
+        ["Active Listings", totalList],
+        ["Queue Size", data.queue.total],
+        ["Oldest Queued", data.queue.oldest_queued ? data.queue.oldest_queued.slice(0, 10) : "—"]
+      ].map(([label, value]) =>
+        `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`
+      ).join("");
+
+      // monitors table
+      const tbody = document.getElementById("monitors-body");
+      if (!data.monitors.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No monitors yet.</td></tr>';
+        return;
+      }
+      for (const m of data.monitors) {
+        const status = m.paused
+          ? '<span class="badge badge-yellow">Paused</span>'
+          : m.next_run_time
+            ? '<span class="badge badge-green">Active</span>'
+            : '<span class="badge badge-gray">Stopped</span>';
+        const nextRun = m.next_run_time ? m.next_run_time.slice(0, 19).replace("T", " ") : "—";
+        const lastScrape = m.last_scrape ? m.last_scrape.slice(0, 19).replace("T", " ") : "—";
+        const avgP = m.avg_price !== null ? "\\u20AC" + Number(m.avg_price).toFixed(2) : "—";
+        const row = document.createElement("tr");
+        row.innerHTML =
+          `<td><strong>${m.name}</strong></td>` +
+          `<td>${m.query}</td>` +
+          `<td>${status}<br><span style="font-size:0.8rem;color:var(--muted)">${nextRun}</span></td>` +
+          `<td><span style="font-size:0.85rem;color:var(--muted)">${lastScrape}</span></td>` +
+          `<td>${m.active_listings ?? 0} active / ${m.sold_listings ?? 0} sold</td>` +
+          `<td>${avgP}</td>` +
+          `<td class="actions">
+            <a href="/api/monitor/${m.id}/run">Run</a>
+            <a href="/api/monitor/${m.id}/analytics">Data</a>
+            <a href="/api/monitor/${m.id}/dashboard">Chart</a>
+          </td>`;
+        tbody.appendChild(row);
+      }
+    })();
+  </script>
+</body>
+</html>
+"""
+
+
+def _build_queue_html() -> str:
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vinted Analytics · Queue</title>
+  <style>
+    :root {
+      --bg: #f3efe7;
+      --panel: #fffaf3;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --accent: #b45309;
+      --accent-2: #0f766e;
+      --line: #e5dccf;
+      --green: #059669;
+      --red: #dc2626;
+      --yellow: #d97706;
+      --radius: 18px;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(180,83,9,0.12), transparent 28%),
+        radial-gradient(circle at top right, rgba(15,118,110,0.10), transparent 30%),
+        linear-gradient(180deg, #f7f2ea 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1280px; margin: 0 auto; padding: 24px 20px 48px; }
+
+    .nav {
+      display: flex; gap: 24px; align-items: center;
+      padding: 14px 0; margin-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .nav a {
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      font-size: 0.95rem; color: var(--muted); text-decoration: none;
+    }
+    .nav a:hover { color: var(--ink); }
+    .nav .brand {
+      font-family: Georgia, serif; font-size: 1.2rem;
+      font-weight: 700; color: var(--accent); margin-right: auto;
+    }
+    .nav .active { color: var(--ink); font-weight: 600; }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px; margin-bottom: 24px;
+    }
+    .card {
+      background: rgba(255,250,243,0.92);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 10px 30px rgba(31,41,55,0.05);
+      backdrop-filter: blur(6px);
+      padding: 16px 18px;
+    }
+    .label {
+      font-size: 0.8rem; color: var(--muted);
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .value { margin-top: 6px; font-size: 1.8rem; font-weight: 700; }
+
+    .table-wrap {
+      background: rgba(255,250,243,0.92);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 10px 30px rgba(31,41,55,0.05);
+      backdrop-filter: blur(6px);
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      text-align: left; padding: 12px 14px;
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      font-size: 0.8rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      border-bottom: 1px solid var(--line);
+      background: rgba(229,220,207,0.2);
+    }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 0.95rem; }
+
+    .badge {
+      display: inline-block; padding: 2px 10px; border-radius: 999px;
+      font-family: "Helvetica Neue", Arial, sans-serif;
+      font-size: 0.8rem; font-weight: 600;
+    }
+    .badge-green { background: #d1fae5; color: var(--green); }
+    .badge-red { background: #fce4e4; color: var(--red); }
+    .badge-yellow { background: #fef3c7; color: var(--yellow); }
+    .badge-gray { background: #e5e7eb; color: var(--muted); }
+
+    .item-title { color: var(--ink); text-decoration: none; }
+    .item-title:hover { text-decoration: underline; }
+
+    .empty {
+      padding: 48px; text-align: center; color: var(--muted);
+      font-family: "Helvetica Neue", Arial, sans-serif;
+    }
+    .section-title { margin: 28px 0 12px; font-size: 1.3rem; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <nav class="nav">
+      <span class="brand">Vinted Analytics</span>
+      <a href="/api/dashboard">Dashboard</a>
+      <a href="/api/queue/dashboard" class="active">Queue</a>
+    </nav>
+
+    <section class="cards" id="summary-cards"></section>
+
+    <h2 class="section-title">Verification Queue <span style="font-size:0.9rem;color:var(--muted);font-weight:400">(oldest 100 by last check)</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Item</th>
+            <th>Brand</th>
+            <th>Price</th>
+            <th>Monitor</th>
+            <th>Queued</th>
+            <th>Last Check</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="queue-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <script>
+    (async () => {
+      const resp = await fetch("/api/queue");
+      if (!resp.ok) { document.body.innerHTML = '<div class="shell"><p class="empty">Failed to load queue.</p></div>'; return; }
+      const data = await resp.json();
+
+      document.getElementById("summary-cards").innerHTML = [
+        ["Queue Size", data.total],
+        ["Oldest Queued", data.oldest_queued ? data.oldest_queued.slice(0, 10) : "—"]
+      ].map(([label, value]) =>
+        `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`
+      ).join("");
+
+      const tbody = document.getElementById("queue-body");
+      if (!data.items.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">Queue is empty.</td></tr>';
+        return;
+      }
+      for (const item of data.items) {
+        const title = item.title || "(deleted)";
+        const url = item.url || "#";
+        const brand = item.brand || "—";
+        const price = item.price !== null ? "\\u20AC" + Number(item.price).toFixed(2) : "—";
+        const mon = item.monitor_name || "—";
+
+        let statusBadge;
+        if (item.is_active === 0 && item.sold_at) {
+          statusBadge = '<span class="badge badge-red">Sold</span>';
+        } else if (item.is_active === 0) {
+          statusBadge = '<span class="badge badge-yellow">Removed</span>';
+        } else if (item.is_active === 1) {
+          statusBadge = '<span class="badge badge-green">Active</span>';
+        } else {
+          statusBadge = '<span class="badge badge-gray">Unknown</span>';
+        }
+
+        const queued = item.queued_at ? item.queued_at.slice(0, 19).replace("T", " ") : "—";
+        const lastCheck = item.last_check ? item.last_check.slice(0, 19).replace("T", " ") : "—";
+
+        const row = document.createElement("tr");
+        row.innerHTML =
+          `<td><a href="${url}" class="item-title" target="_blank">${title}</a></td>` +
+          `<td>${brand}</td>` +
+          `<td>${price}</td>` +
+          `<td>${mon}</td>` +
+          `<td>${queued}</td>` +
+          `<td>${lastCheck}</td>` +
+          `<td>${statusBadge}</td>`;
+        tbody.appendChild(row);
+      }
+    })();
+  </script>
+</body>
+</html>
+"""
+
+
+# ── HTML endpoints ───────────────────────────────────────────────────────────
+
+
+@router.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    return HTMLResponse(_build_overview_html())
+
+
+@router.get("/queue/dashboard", response_class=HTMLResponse)
+def queue_dashboard():
+    return HTMLResponse(_build_queue_html())

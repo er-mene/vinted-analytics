@@ -52,7 +52,22 @@ def init_db():
             last_check TIMESTAMP
         )
     ''')
-    
+
+    try:
+        cursor.execute("ALTER TABLE listings ADD COLUMN scrape_position INTEGER")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE listings ADD COLUMN last_seen_at TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE monitors ADD COLUMN last_scrape TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -91,43 +106,99 @@ def get_monitors_list():
     conn.close()
     return [dict(r) for r in rows]
 
-def save_listings(monitor_id, items):
-    """Save scraped listing items into the `listings` table. Returns count of new inserts."""
-    if not items: return 0
+def get_active_positions_for_monitor(monitor_id: int) -> dict[int, dict]:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, scrape_position, price
+        FROM listings
+        WHERE monitor_id = ? AND is_active = 1
+    """, (monitor_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return {
+        row[0]: {"position": row[1], "price": row[2]}
+        for row in rows if row[1] is not None
+    }
+
+
+def save_listings(monitor_id: int, items: list) -> int:
+    if not items:
+        return 0
+
+    prev_data = get_active_positions_for_monitor(monitor_id)
+
+    new_ids_set = {item["id"] for item in items}
+
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     new_count = 0
 
-    items_id = [item['id'] for item in items]
-    placeholders = ', '.join(['?'] * len(items_id))
+    # Find pivot: among items present in both scrapes with same price,
+    # the one with the highest old position
+    pivot = -1
+    for position, item in enumerate(items):
+        item_id = item["id"]
+        if item_id in prev_data and prev_data[item_id]["price"] == item["price"]:
+            old_pos = prev_data[item_id]["position"]
+            if old_pos is not None and old_pos > pivot:
+                pivot = old_pos
 
-    cursor.execute(f'''
-        INSERT INTO verification_queue(id, url, queued_at, last_check)
-        SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-        FROM listings
-        WHERE is_active = 1 AND id NOT IN ({placeholders})
-        ON CONFLICT(id) DO UPDATE SET
-        last_check = CURRENT_TIMESTAMP
-    ''', items_id
-    )
+    # Fallback: no unmodified item → use any common item
+    if pivot == -1:
+        for position, item in enumerate(items):
+            item_id = item["id"]
+            if item_id in prev_data:
+                old_pos = prev_data[item_id]["position"]
+                if old_pos is not None and old_pos > pivot:
+                    pivot = old_pos
 
-    for item in items:
-        cursor.execute('''
-            INSERT INTO listings 
-            (id, monitor_id, title, brand, price, url, status_id, is_active, likes, listed_at, has_been_promoted)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    # Clear queue for items that reappeared (false positives)
+    if new_ids_set:
+        ph = ", ".join(["?"] * len(new_ids_set))
+        cursor.execute(f"DELETE FROM verification_queue WHERE id IN ({ph})", list(new_ids_set))
+
+    # Save listings with their scrape position
+    for position, item in enumerate(items):
+        cursor.execute("""
+            INSERT INTO listings
+            (id, monitor_id, title, brand, price, url, status_id, is_active, likes, listed_at, has_been_promoted, scrape_position, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(id, monitor_id) DO UPDATE SET
             price = excluded.price,
             likes = excluded.likes,
             is_active = 1,
             sold_at = null,
-            has_been_promoted = MAX(listings.has_been_promoted, excluded.has_been_promoted)
-        ''', (
-            item['id'], monitor_id, item['title'], item['brand'], item['price'], item['url'],
-            item.get('status_id'), 1, item.get('likes'),  item.get('listed_at'), item.get('has_been_promoted')
+            has_been_promoted = MAX(listings.has_been_promoted, excluded.has_been_promoted),
+            scrape_position = excluded.scrape_position,
+            last_seen_at = CURRENT_TIMESTAMP
+        """, (
+            item["id"], monitor_id, item["title"], item["brand"], item["price"],
+            item["url"], item.get("status_id"), 1, item.get("likes"),
+            item.get("listed_at"), item.get("has_been_promoted"), position,
         ))
-        if cursor.rowcount > 0: new_count += 1
-            
+        if cursor.rowcount > 0:
+            new_count += 1
+
+    # Add disappeared items (within boundary, not in new scrape) to queue
+    if pivot >= 0:
+        disappeared = []
+        for prev_id, info in prev_data.items():
+            if prev_id not in new_ids_set:
+                p = info["position"]
+                if p is not None and p <= pivot:
+                    disappeared.append(prev_id)
+        if disappeared:
+            ph = ", ".join(["?"] * len(disappeared))
+            cursor.execute(f"""
+                INSERT INTO verification_queue(id, url, queued_at, last_check)
+                SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                FROM listings
+                WHERE id IN ({ph})
+                ON CONFLICT(id) DO UPDATE SET
+                last_check = CURRENT_TIMESTAMP
+            """, disappeared)
+
     conn.commit()
     conn.close()
     return new_count
@@ -236,6 +307,35 @@ def delete_listing(item_id: int):
     conn.commit()
     conn.close()
 
+def delete_from_queue(item_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM verification_queue WHERE id = ?", (item_id,))
+    conn.commit()
+    conn.close()
+
+def update_monitor_last_scrape(monitor_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE monitors SET last_scrape = CURRENT_TIMESTAMP WHERE id = ?", (monitor_id,))
+    conn.commit()
+    conn.close()
+
+def get_recent_items(monitor_id: int, limit: int = 10):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, title, brand, price, url, likes, listed_at, last_seen_at
+        FROM listings
+        WHERE monitor_id = ?
+        ORDER BY likes DESC
+        LIMIT ?
+    """, (monitor_id, limit))
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
 def get_monitor_analytics(monitor_id: int):
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
@@ -298,3 +398,54 @@ def get_monitor_analytics(monitor_id: int):
         "price_likes": price_likes,
         "sell_speed": sell_speed,
     }
+
+
+def get_monitors_with_stats():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT m.*,
+               COUNT(l.id) AS total_listings,
+               SUM(CASE WHEN l.is_active = 1 THEN 1 ELSE 0 END) AS active_listings,
+               SUM(CASE WHEN l.sold_at IS NOT NULL THEN 1 ELSE 0 END) AS sold_listings,
+               ROUND(AVG(l.price), 2) AS avg_price,
+               ROUND(AVG(l.likes), 2) AS avg_likes
+        FROM monitors m
+        LEFT JOIN listings l ON l.monitor_id = m.id
+        GROUP BY m.id
+        ORDER BY m.id
+    """)
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    for row in rows:
+        row["status_ids"] = json.loads(row["status_ids"]) if isinstance(row.get("status_ids"), str) else []
+    return rows
+
+
+def get_verification_queue_summary():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) AS total, MIN(queued_at) AS oldest_queued FROM verification_queue")
+    row = cursor.fetchone()
+    conn.close()
+    return {"total": row[0], "oldest_queued": row[1]}
+
+
+def get_verification_queue_items(limit: int = 100):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT vq.id, vq.url, vq.queued_at, vq.last_check,
+               l.title, l.brand, l.price, l.is_active, l.sold_at, l.monitor_id,
+               m.name AS monitor_name
+        FROM verification_queue vq
+        LEFT JOIN listings l ON l.id = vq.id
+        LEFT JOIN monitors m ON m.id = l.monitor_id
+        ORDER BY vq.last_check ASC
+        LIMIT ?
+    """, (limit,))
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
