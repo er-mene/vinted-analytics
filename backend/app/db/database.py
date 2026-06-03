@@ -1,9 +1,11 @@
+import os
 import sqlite3
 import json
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
-DB_NAME = "vinted_data.db"
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DB_NAME = os.path.join(BACKEND_DIR, "vinted_data.db")
 scheduler = BackgroundScheduler()
 
 def init_db():

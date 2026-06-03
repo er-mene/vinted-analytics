@@ -29,11 +29,12 @@ FastAPI service for tracking Vinted search results, storing listing history in S
 
 ## Project Layout
 
-- [main.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/main.py): app startup, scheduler startup, verification worker lifecycle.
-- [app/api/endpoints.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/app/api/endpoints.py): API routes, monitor scheduling, analytics JSON, dashboard HTML.
-- [app/db/database.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/app/db/database.py): schema creation and all database operations.
-- [app/services/vinted_service.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/app/services/vinted_service.py): Vinted requests and item status checks.
-- [app/tasks/verification_worker.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/app/tasks/verification_worker.py): background verification loop.
+- [backend/main.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/main.py): app startup, scheduler startup, verification worker lifecycle.
+- [backend/app/api/endpoints.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/api/endpoints.py): API routes, monitor scheduling, analytics JSON, dashboard HTML.
+- [backend/app/db/database.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/db/database.py): schema creation and all database operations.
+- [backend/app/services/vinted_service.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/services/vinted_service.py): Vinted requests and item status checks.
+- [backend/app/tasks/verification_worker.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/tasks/verification_worker.py): background verification loop.
+- [frontend/](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/frontend/): Vite + React + TypeScript frontend.
 
 ## Database
 
@@ -114,17 +115,26 @@ Note: the sell-time chart will be empty until some listings are marked as sold.
 
 ## Running Locally
 
-Install dependencies and start the API:
+### Backend
 
 ```bash
+cd backend
 pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
 Then open:
 
-- `http://127.0.0.1:8000/docs`
-- `http://127.0.0.1:8000/api/monitor/1/dashboard`
+- `http://127.0.0.1:8000/docs` - API docs
+- `http://127.0.0.1:5173` - Frontend
 
 ## Notes
 
