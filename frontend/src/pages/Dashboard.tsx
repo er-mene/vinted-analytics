@@ -1,10 +1,15 @@
-import { useCallback } from "react";
+import { useState, useCallback } from "react";
 import { fetchOverview } from "../api";
 import { usePolling } from "../hooks/usePolling";
+import { fmtDate } from "../utils";
 import SummaryCards from "../components/SummaryCards";
 import MonitorCard from "../components/MonitorCard";
+import CreateMonitorModal from "../components/CreateMonitorModal";
+import type { Monitor } from "../types";
 
 export default function Dashboard() {
+  const [showCreate, setShowCreate] = useState(false);
+  const [editingMonitor, setEditingMonitor] = useState<Monitor | null>(null);
   const fetcher = useCallback(() => fetchOverview(), []);
   const { data, error, isLoading } = usePolling(fetcher, 2000);
 
@@ -33,6 +38,23 @@ export default function Dashboard() {
 
   return (
     <div className="max-w-7xl mx-auto px-5 py-6">
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold font-serif">Dashboard</h1>
+        <button
+          onClick={() => setShowCreate(true)}
+          className="font-sans text-sm font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-2 rounded-xl transition-colors"
+        >
+          + New Monitor
+        </button>
+      </div>
+
+      {(showCreate || editingMonitor) && (
+        <CreateMonitorModal
+          editMonitor={editingMonitor}
+          onClose={() => { setShowCreate(false); setEditingMonitor(null); }}
+        />
+      )}
+
       <SummaryCards
         cards={[
           { label: "Monitors", value: data.monitors.length },
@@ -40,9 +62,7 @@ export default function Dashboard() {
           { label: "Queue Size", value: data.queue.total },
           {
             label: "Oldest Queued",
-            value: data.queue.oldest_queued
-              ? data.queue.oldest_queued.slice(0, 10)
-              : "—",
+            value: fmtDate(data.queue.oldest_queued),
           },
         ]}
       />
@@ -54,7 +74,7 @@ export default function Dashboard() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {data.monitors.map((m) => (
-            <MonitorCard key={m.id} monitor={m} />
+            <MonitorCard key={m.id} monitor={m} onEdit={setEditingMonitor} />
           ))}
         </div>
       )}

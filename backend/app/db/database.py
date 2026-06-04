@@ -70,25 +70,99 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    try:
+        cursor.execute("ALTER TABLE monitors ADD COLUMN search_time_seconds INTEGER DEFAULT 5184000")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE monitors ADD COLUMN interval_days INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE monitors ADD COLUMN interval_hours INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE monitors ADD COLUMN interval_minutes INTEGER DEFAULT 30")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE monitors ADD COLUMN interval_seconds INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
 
-def create_monitor(name, query, brand_id, min_price, max_price, status_ids=[], max_pages=None, page_delay_seconds=4.0):
+def create_monitor(name, query, brand_id, min_price, max_price, status_ids=[], max_pages=None, page_delay_seconds=4.0, search_time_seconds=5184000, interval_days=0, interval_hours=0, interval_minutes=30, interval_seconds=0):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
     status_str = json.dumps(status_ids) if status_ids else "[]"
     
     cursor.execute('''
-        INSERT INTO monitors (name, query, brand_id, min_price, max_price, status_ids, max_pages, page_delay_seconds)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (name, query, brand_id, min_price, max_price, status_str, max_pages, page_delay_seconds))
+        INSERT INTO monitors (name, query, brand_id, min_price, max_price, status_ids, max_pages, page_delay_seconds, search_time_seconds, interval_days, interval_hours, interval_minutes, interval_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (name, query, brand_id, min_price, max_price, status_str, max_pages, page_delay_seconds, search_time_seconds, interval_days, interval_hours, interval_minutes, interval_seconds))
     
     monitor_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return monitor_id
+
+def update_monitor(monitor_id, name=None, query=None, brand_id=None, min_price=None, max_price=None, status_ids=None, max_pages=None, page_delay_seconds=None, search_time_seconds=None, interval_days=None, interval_hours=None, interval_minutes=None, interval_seconds=None):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    fields = []
+    values = []
+    if name is not None:
+        fields.append("name = ?")
+        values.append(name)
+    if query is not None:
+        fields.append("query = ?")
+        values.append(query)
+    if brand_id is not None:
+        fields.append("brand_id = ?")
+        values.append(brand_id)
+    if min_price is not None:
+        fields.append("min_price = ?")
+        values.append(min_price)
+    if max_price is not None:
+        fields.append("max_price = ?")
+        values.append(max_price)
+    if status_ids is not None:
+        fields.append("status_ids = ?")
+        values.append(json.dumps(status_ids) if status_ids else "[]")
+    if max_pages is not None:
+        fields.append("max_pages = ?")
+        values.append(max_pages)
+    if page_delay_seconds is not None:
+        fields.append("page_delay_seconds = ?")
+        values.append(page_delay_seconds)
+    if search_time_seconds is not None:
+        fields.append("search_time_seconds = ?")
+        values.append(search_time_seconds)
+    if interval_days is not None:
+        fields.append("interval_days = ?")
+        values.append(interval_days)
+    if interval_hours is not None:
+        fields.append("interval_hours = ?")
+        values.append(interval_hours)
+    if interval_minutes is not None:
+        fields.append("interval_minutes = ?")
+        values.append(interval_minutes)
+    if interval_seconds is not None:
+        fields.append("interval_seconds = ?")
+        values.append(interval_seconds)
+
+    if fields:
+        cursor.execute(f"UPDATE monitors SET {', '.join(fields)} WHERE id = ?", (*values, monitor_id))
+    
+    conn.commit()
+    conn.close()
 
 def get_monitor(monitor_id):
     conn = sqlite3.connect(DB_NAME)
@@ -155,11 +229,6 @@ def save_listings(monitor_id: int, items: list) -> int:
                 if old_pos is not None and old_pos > pivot:
                     pivot = old_pos
 
-    # Clear queue for items that reappeared (false positives)
-    if new_ids_set:
-        ph = ", ".join(["?"] * len(new_ids_set))
-        cursor.execute(f"DELETE FROM verification_queue WHERE id IN ({ph})", list(new_ids_set))
-
     # Save listings with their scrape position
     for position, item in enumerate(items):
         cursor.execute("""
@@ -169,8 +238,6 @@ def save_listings(monitor_id: int, items: list) -> int:
             ON CONFLICT(id, monitor_id) DO UPDATE SET
             price = excluded.price,
             likes = excluded.likes,
-            is_active = 1,
-            sold_at = null,
             has_been_promoted = MAX(listings.has_been_promoted, excluded.has_been_promoted),
             scrape_position = excluded.scrape_position,
             last_seen_at = CURRENT_TIMESTAMP
@@ -253,16 +320,20 @@ def delete_monitor(monitor_id: int):
     conn.commit()
     conn.close()
 
-def get_items_to_verify(max_items: int):
+def get_items_to_verify(max_items: int | None = None):
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute('''
+    query = '''
         SELECT id, url
         FROM verification_queue
         ORDER BY last_check
-        LIMIT ?
-    ''', (max_items,))
+    '''
+    if max_items is not None:
+        query += ' LIMIT ?'
+        cursor.execute(query, (max_items,))
+    else:
+        cursor.execute(query)
     rows = cursor.fetchall()
     items = [{"id":row["id"], "url":row["url"]} for row in rows]
     
@@ -334,6 +405,25 @@ def get_recent_items(monitor_id: int, limit: int = 10):
         ORDER BY likes DESC
         LIMIT ?
     """, (monitor_id, limit))
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+def get_listings(monitor_id: int, sort_by: str = "likes", order: str = "DESC", limit: int = 200, offset: int = 0):
+    allowed_sort = {"likes", "price", "listed_at"}
+    if sort_by not in allowed_sort:
+        sort_by = "likes"
+    order = "ASC" if order.upper() == "ASC" else "DESC"
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        SELECT id, title, brand, price, url, likes, listed_at, is_active, sold_at
+        FROM listings
+        WHERE monitor_id = ?
+        ORDER BY {sort_by} {order}, id
+        LIMIT ? OFFSET ?
+    """, (monitor_id, limit, offset))
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     return rows
@@ -434,11 +524,11 @@ def get_verification_queue_summary():
     return {"total": row[0], "oldest_queued": row[1]}
 
 
-def get_verification_queue_items(limit: int = 100):
+def get_verification_queue_items(limit: int | None = None):
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("""
+    query = """
         SELECT vq.id, vq.url, vq.queued_at, vq.last_check,
                l.title, l.brand, l.price, l.is_active, l.sold_at, l.monitor_id,
                m.name AS monitor_name
@@ -446,8 +536,12 @@ def get_verification_queue_items(limit: int = 100):
         LEFT JOIN listings l ON l.id = vq.id
         LEFT JOIN monitors m ON m.id = l.monitor_id
         ORDER BY vq.last_check ASC
-        LIMIT ?
-    """, (limit,))
+    """
+    if limit is not None:
+        query += " LIMIT ?"
+        cursor.execute(query, (limit,))
+    else:
+        cursor.execute(query)
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     return rows

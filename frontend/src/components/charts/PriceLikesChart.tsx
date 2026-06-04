@@ -10,6 +10,7 @@ import {
   Legend,
 } from "recharts";
 import type { ListingPoint } from "../../types";
+import { fmtDate } from "../../utils";
 
 interface Props {
   data: ListingPoint[];
@@ -24,7 +25,7 @@ function jitter(val: number | null, id: number, spread: number): number {
 function CustomTooltip({ active, payload }: any) {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
-  const listed = d.listed_at ? d.listed_at.slice(0, 10) : "—";
+  const listed = fmtDate(d.listed_at);
   return (
     <div
       style={{
@@ -90,7 +91,7 @@ export default function PriceLikesChart({ data }: Props) {
           type="number"
           domain={['dataMin - 5', 'dataMax + 5']}
           tickCount={8}
-          tickFormatter={(v: number) => "€" + v}
+          tickFormatter={(v: number) => "€" + Math.round(v)}
           tick={{ fontSize: 11, fill: "#6b7280" }}
           stroke="#cdbda9"
         />
@@ -100,6 +101,7 @@ export default function PriceLikesChart({ data }: Props) {
           type="number"
           domain={['dataMin - 2', 'dataMax + 2']}
           tickCount={8}
+          tickFormatter={(v: number) => String(Math.round(v))}
           tick={{ fontSize: 11, fill: "#6b7280" }}
           stroke="#cdbda9"
         />

@@ -123,6 +123,12 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
+Or from the project root:
+
+```bash
+.venv/bin/uvicorn backend.main:app --reload
+```
+
 ### Frontend
 
 ```bash

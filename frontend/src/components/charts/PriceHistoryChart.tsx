@@ -8,6 +8,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import type { PriceHistoryPoint } from "../../types";
+import { fmtDate } from "../../utils";
 
 interface Props {
   data: PriceHistoryPoint[];
@@ -31,7 +32,7 @@ export default function PriceHistoryChart({ data }: Props) {
         <XAxis
           dataKey="day"
           tick={{ fontSize: 11, fill: "#6b7280" }}
-          tickFormatter={(v: string) => v.slice(5)}
+          tickFormatter={(v: string) => fmtDate(v)}
           stroke="#cdbda9"
         />
         <YAxis
@@ -50,7 +51,7 @@ export default function PriceHistoryChart({ data }: Props) {
             fontFamily: '"Helvetica Neue", Arial, sans-serif',
           }}
           formatter={(value: any) => "€" + Number(value).toFixed(2)}
-          labelFormatter={(label: any) => "Date: " + label}
+          labelFormatter={(label: any) => fmtDate(label)}
         />
 
         {/* Price range band */}

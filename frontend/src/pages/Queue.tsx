@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { fetchQueue } from "../api";
 import { usePolling } from "../hooks/usePolling";
+import { fmtDate } from "../utils";
 import SummaryCards from "../components/SummaryCards";
 import QueueItemRow from "../components/QueueItemRow";
 
@@ -33,9 +34,7 @@ export default function Queue() {
           { label: "Queue Size", value: data.total },
           {
             label: "Oldest Queued",
-            value: data.oldest_queued
-              ? data.oldest_queued.slice(0, 10)
-              : "—",
+            value: fmtDate(data.oldest_queued),
           },
           {
             label: "By last check",

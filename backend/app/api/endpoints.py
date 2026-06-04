@@ -9,6 +9,7 @@ from datetime import datetime
 from app.db.database import (
     create_monitor,
     get_monitor,
+    update_monitor,
     save_listings,
     get_monitors_list,
     delete_monitor,
@@ -17,6 +18,7 @@ from app.db.database import (
     get_verification_queue_summary,
     get_verification_queue_items,
     get_recent_items,
+    get_listings,
     update_monitor_last_scrape,
     scheduler,
 )
@@ -28,6 +30,24 @@ MIN_MONITOR_INTERVAL_SECONDS = 30 * 60
 
 _run_locks: dict[int, threading.Lock] = {}
 _run_locks_guard = threading.Lock()
+
+_progress: dict[int, dict] = {}
+_progress_guard = threading.Lock()
+
+
+def _set_progress(monitor_id: int, current: int, total: int):
+    with _progress_guard:
+        _progress[monitor_id] = {"current": current, "total": total}
+
+
+def _get_progress(monitor_id: int) -> dict | None:
+    with _progress_guard:
+        return _progress.get(monitor_id)
+
+
+def _clear_progress(monitor_id: int):
+    with _progress_guard:
+        _progress.pop(monitor_id, None)
 
 
 def _monitor_lock(monitor_id: int) -> threading.Lock:
@@ -370,6 +390,11 @@ class MonitorCreate(BaseModel):
     seconds: int = 0
     max_pages: Optional[int] = None
     page_delay_seconds: float = 4.0
+    search_time_seconds: int = 5184000
+    interval_days: int = 0
+    interval_hours: int = 0
+    interval_minutes: int = 30
+    interval_seconds: int = 0
 
 @router.get("/")
 def show_monitors():
@@ -379,17 +404,18 @@ def show_monitors():
 @router.post("/monitor")
 def add_monitor(monitor: MonitorCreate):
     """Creates a new tracked search."""
-    id = create_monitor(
-        monitor.name, monitor.query, monitor.brand_id, 
-        monitor.min_price, monitor.max_price, monitor.status_ids,
-        monitor.max_pages, monitor.page_delay_seconds,
-    )
-
     interval_days, interval_hours, interval_minutes, interval_seconds = _normalize_monitor_interval(
         monitor.days,
         monitor.hours,
         monitor.minutes,
         monitor.seconds,
+    )
+
+    id = create_monitor(
+        monitor.name, monitor.query, monitor.brand_id,
+        monitor.min_price, monitor.max_price, monitor.status_ids,
+        monitor.max_pages, monitor.page_delay_seconds, monitor.search_time_seconds,
+        interval_days, interval_hours, interval_minutes, interval_seconds,
     )
     
     scheduler.add_job(
@@ -451,8 +477,14 @@ def run_monitor(monitor_id: int):
         status_ids = json.loads(m["status_ids"])
         max_pages = m.get("max_pages")
         page_delay_seconds = m.get("page_delay_seconds") or 4.0
+        search_time_seconds = m.get("search_time_seconds") or 5184000
         
         print(f"🔄 Running Monitor: {m['name']}...")
+
+        def progress_cb(current: int, total: int):
+            _set_progress(monitor_id, current, total)
+
+        _set_progress(monitor_id, 0, 1)
         items = search_vinted(
             query=m["query"],
             brand_id=m["brand_id"],
@@ -461,6 +493,8 @@ def run_monitor(monitor_id: int):
             status_ids=status_ids,
             max_pages=max_pages,
             page_delay_seconds=page_delay_seconds,
+            search_time_seconds=search_time_seconds,
+            progress_callback=progress_cb,
         )
 
         new_count = save_listings(monitor_id, items)
@@ -482,7 +516,16 @@ def run_monitor(monitor_id: int):
         logger.exception(f"Job {monitor_id} failed: {e}")
         raise
     finally:
+        _clear_progress(monitor_id)
         lock.release()
+
+
+@router.get("/monitor/{monitor_id}/progress")
+def monitor_progress(monitor_id: int):
+    p = _get_progress(monitor_id)
+    if p is None:
+        return {"current": 0, "total": 0, "running": False}
+    return {**p, "running": True}
 
 
 @router.get("/monitor/{monitor_id}/analytics")
@@ -509,6 +552,15 @@ def monitor_analytics(monitor_id: int):
     return analytics
 
 
+@router.get("/monitor/{monitor_id}/listings")
+def monitor_listings(monitor_id: int, sort_by: str = "likes", order: str = "desc", limit: int = 200, offset: int = 0):
+    if not get_monitor(monitor_id):
+        raise HTTPException(status_code=404, detail="Monitor not found")
+    return JSONResponse(
+        get_listings(monitor_id, sort_by=sort_by, order=order, limit=limit, offset=offset),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
 @router.get("/monitor/{monitor_id}/dashboard", response_class=HTMLResponse)
 def monitor_dashboard(monitor_id: int):
     if not get_monitor(monitor_id):
@@ -520,6 +572,57 @@ def delete_monitor_from_db(monitor_id: int):
     delete_monitor(monitor_id)
     scheduler.remove_job(str(monitor_id))
     return {"message": f"Monitor {monitor_id} deleted"}
+
+
+@router.put("/monitor/{monitor_id}")
+def edit_monitor(monitor_id: int, monitor: MonitorCreate):
+    existing = get_monitor(monitor_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Monitor not found")
+
+    interval_days, interval_hours, interval_minutes, interval_seconds = _normalize_monitor_interval(
+        monitor.days,
+        monitor.hours,
+        monitor.minutes,
+        monitor.seconds,
+    )
+
+    update_monitor(
+        monitor_id=monitor_id,
+        name=monitor.name,
+        query=monitor.query,
+        brand_id=monitor.brand_id,
+        min_price=monitor.min_price,
+        max_price=monitor.max_price,
+        status_ids=monitor.status_ids,
+        max_pages=monitor.max_pages,
+        page_delay_seconds=monitor.page_delay_seconds,
+        search_time_seconds=monitor.search_time_seconds,
+        interval_days=interval_days,
+        interval_hours=interval_hours,
+        interval_minutes=interval_minutes,
+        interval_seconds=interval_seconds,
+    )
+
+    scheduler.reschedule_job(
+        str(monitor_id),
+        trigger="interval",
+        days=interval_days,
+        hours=interval_hours,
+        minutes=interval_minutes,
+        seconds=interval_seconds,
+    )
+
+    return {
+        "message": "Monitor updated",
+        "monitor_id": monitor_id,
+        "effective_interval": {
+            "days": interval_days,
+            "hours": interval_hours,
+            "minutes": interval_minutes,
+            "seconds": interval_seconds,
+        },
+    }
 
 
 # ── JSON endpoints ──────────────────────────────────────────────────────────
@@ -542,7 +645,7 @@ def overview():
 @router.get("/queue")
 def queue_items():
     summary = get_verification_queue_summary()
-    items = get_verification_queue_items(limit=100)
+    items = get_verification_queue_items()
     return JSONResponse(
         {**summary, "items": items},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
@@ -884,7 +987,7 @@ def _build_queue_html() -> str:
 
     <section class="cards" id="summary-cards"></section>
 
-    <h2 class="section-title">Verification Queue <span style="font-size:0.9rem;color:var(--muted);font-weight:400">(oldest 100 by last check)</span></h2>
+    <h2 class="section-title">Verification Queue <span style="font-size:0.9rem;color:var(--muted);font-weight:400">(oldest first)</span></h2>
     <div class="table-wrap">
       <table>
         <thead>

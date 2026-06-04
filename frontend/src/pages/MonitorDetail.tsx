@@ -60,6 +60,12 @@ export default function MonitorDetail() {
           &larr; Dashboard
         </Link>
         <h1 className="text-2xl font-bold font-serif">{s.name}</h1>
+        <Link
+          to={`/monitor/${id}/listings`}
+          className="ml-auto text-accent-2 font-sans text-sm hover:underline"
+        >
+          Browse Listings &rarr;
+        </Link>
       </div>
 
       {/* Summary cards */}

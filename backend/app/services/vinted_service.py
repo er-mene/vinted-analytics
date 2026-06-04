@@ -1,4 +1,5 @@
 import random
+import re
 import time
 import threading
 from enum import Enum
@@ -34,6 +35,7 @@ def _parse_item(item):
         "status_id": item.get("status"),
         "likes": int(item.get("favourite_count", 0)),
         "listed_at": listing_date,
+        "listed_at_ts": unix_time,
         "has_been_promoted": 1 if item.get("promoted") else 0,
     }
 
@@ -46,6 +48,8 @@ def search_vinted(
     status_ids: List[int] = None,
     max_pages: int = None,
     page_delay_seconds: float = 4.0,
+    search_time_seconds: int = 5184000,
+    progress_callback=None,
 ):
     session = get_vinted_session()
 
@@ -113,6 +117,9 @@ def search_vinted(
             print(f"⚠️ skipped item {item.get('id')} due to error: {e}")
             continue
 
+    if progress_callback:
+        progress_callback(1, pages_to_fetch)
+
     print(f"✅ Page 1/{pages_to_fetch}: {len(raw_items)} raw ({len(clean_items)} kept)")
 
     for page in range(2, pages_to_fetch + 1):
@@ -142,10 +149,21 @@ def search_vinted(
                 )
                 continue
 
+        if progress_callback:
+            progress_callback(page, pages_to_fetch)
+
         print(
             f"✅ Page {page}/{pages_to_fetch}: {len(page_raw)} raw, "
             f"{new_on_page} new (total {len(clean_items)})"
         )
+
+    # Filter by listing time
+    now = time.time()
+    if search_time_seconds:
+        clean_items = [
+            i for i in clean_items
+            if i["listed_at_ts"] is None or (now - i["listed_at_ts"]) <= search_time_seconds
+        ]
 
     print(
         f"🏁 Finished parsing. Returning {len(clean_items)} valid items "
@@ -159,13 +177,27 @@ class ItemStatus(Enum):
     REMOVED = "removed"
     ERROR = "error"
 
+def _get_item_status_data(html: str) -> dict:
+    data = {}
+    for m in re.finditer(r'\\"is_closed\\"\s*:\s*(true|false)', html):
+        data["is_closed"] = m.group(1) == "true"
+    for m in re.finditer(r'\\"item_closing_action\\"\s*:\s*("[^"]*"|null)', html):
+        val = m.group(1)
+        data["item_closing_action"] = None if val == "null" else val.strip('"')
+    for m in re.finditer(r'\\"can_buy\\"\s*:\s*(true|false)', html):
+        data["can_buy"] = m.group(1) == "true"
+    return data
+
+
 def check_item_status(url: str) -> ItemStatus:
     session = get_vinted_session()
 
     try:
         response = session.get(url, timeout=30)
-    except Exception as e:
+    except Exception:
         return ItemStatus.ERROR
+    if response.status_code == 404:
+        return ItemStatus.REMOVED
     if response.status_code >= 400:
         return ItemStatus.ERROR
 
@@ -174,9 +206,17 @@ def check_item_status(url: str) -> ItemStatus:
     except Exception:
         return ItemStatus.ERROR
 
-    if soup.find(attrs={"data-testid": "item-status—content"}):
+    if soup.find(attrs={"data-testid": "item-buy-button"}):
+        return ItemStatus.ACTIVE
+
+    item_data = _get_item_status_data(response.text)
+    if item_data.get("is_closed") and item_data.get("item_closing_action") == "sold":
         return ItemStatus.SOLD
-    
+    if item_data.get("can_buy"):
+        return ItemStatus.ACTIVE
+    if item_data.get("item_closing_action") in ("removed", "deleted"):
+        return ItemStatus.REMOVED
+
     return ItemStatus.ACTIVE
 
     

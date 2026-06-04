@@ -8,6 +8,11 @@ export interface Monitor {
   status_ids: number[];
   max_pages: number | null;
   page_delay_seconds: number;
+  search_time_seconds: number;
+  interval_days: number;
+  interval_hours: number;
+  interval_minutes: number;
+  interval_seconds: number;
   total_listings: number;
   active_listings: number;
   sold_listings: number;
@@ -110,4 +115,56 @@ export interface MonitorAnalytics {
   price_likes: ListingPoint[];
   sell_speed: SellSpeedPoint[];
   correlations: AnalyticsCorrelations;
+}
+
+export interface MonitorListing {
+  id: number;
+  title: string;
+  brand: string | null;
+  price: number | null;
+  url: string;
+  likes: number | null;
+  listed_at: string | null;
+  is_active: number;
+  sold_at: string | null;
+}
+
+export interface MonitorCreatePayload {
+  name: string;
+  query: string;
+  brand_id?: number | null;
+  min_price?: number | null;
+  max_price?: number | null;
+  status_ids?: number[];
+  days?: number;
+  hours?: number;
+  minutes?: number;
+  seconds?: number;
+  max_pages?: number | null;
+  page_delay_seconds?: number;
+  search_time_seconds?: number;
+}
+
+export interface MonitorCreateResponse {
+  message: string;
+  monitor_id: number;
+  effective_interval: {
+    days: number;
+    hours: number;
+    minutes: number;
+    seconds: number;
+    minimum_interval_seconds: number;
+  };
+}
+
+export interface MonitorActionResponse {
+  message: string;
+  monitor_id: number;
+}
+
+export interface RunMonitorResponse {
+  monitor: string;
+  new_items_found: number;
+  current_avg_price: number;
+  total_active_scraped: number;
 }

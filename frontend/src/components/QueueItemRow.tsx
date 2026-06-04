@@ -1,4 +1,5 @@
 import type { QueueItem } from "../types";
+import { fmtDateTime } from "../utils";
 
 const statusInfo: Record<
   string,
@@ -18,8 +19,7 @@ function getStatus(item: QueueItem) {
 }
 
 function fmtTime(iso: string | null) {
-  if (!iso) return "—";
-  return iso.slice(0, 19).replace("T", " ");
+  return fmtDateTime(iso);
 }
 
 export default function QueueItemRow({ item }: { item: QueueItem }) {

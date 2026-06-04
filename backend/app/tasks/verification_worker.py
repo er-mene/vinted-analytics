@@ -5,8 +5,6 @@ import threading
 from app.db.database import get_items_to_verify, mark_item_as_sold, clear_queue, delete_listing, delete_from_queue
 from app.services.vinted_service import check_item_status, ItemStatus
 
-MAX_BATCH_SIZE = 10
-
 class VerificationWorker:
     def __init__(self):
         self.running = False
@@ -33,7 +31,7 @@ class VerificationWorker:
         while self.running:
             try:
                 clear_queue()
-                items = get_items_to_verify(MAX_BATCH_SIZE)
+                items = get_items_to_verify()
 
                 if not items:
                     time.sleep(30)
