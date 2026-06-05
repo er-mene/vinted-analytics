@@ -186,19 +186,23 @@ def get_active_positions_for_monitor(monitor_id: int) -> dict[int, dict]:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT id, scrape_position, price
+        SELECT id, scrape_position, price, last_seen_at
         FROM listings
         WHERE monitor_id = ? AND is_active = 1
     """, (monitor_id,))
     rows = cursor.fetchall()
     conn.close()
     return {
-        row[0]: {"position": row[1], "price": row[2]}
-        for row in rows if row[1] is not None
+        row[0]: {"position": row[1], "price": row[2], "last_seen_at": row[3]}
+        for row in rows
     }
 
 
-def save_listings(monitor_id: int, items: list) -> int:
+# How many days without being seen before an item past the pivot gets enqueued
+QUEUE_ZOMBIE_THRESHOLD_DAYS = 2
+
+
+def save_listings(monitor_id: int, items: list, max_pages: int | None = None) -> int:
     if not items:
         return 0
 
@@ -229,6 +233,13 @@ def save_listings(monitor_id: int, items: list) -> int:
                 if old_pos is not None and old_pos > pivot:
                     pivot = old_pos
 
+    # Scrape depth protection: if we fetched far fewer items than expected,
+    # cap pivot to avoid enqueuing items that simply weren't scraped
+    if max_pages and pivot >= 0:
+        expected = max_pages * 48
+        if len(items) < expected * 0.5:
+            pivot = min(pivot, len(items) - 1)
+
     # Save listings with their scrape position
     for position, item in enumerate(items):
         cursor.execute("""
@@ -240,6 +251,8 @@ def save_listings(monitor_id: int, items: list) -> int:
             likes = excluded.likes,
             has_been_promoted = MAX(listings.has_been_promoted, excluded.has_been_promoted),
             scrape_position = excluded.scrape_position,
+            is_active = excluded.is_active,
+            sold_at = NULL,
             last_seen_at = CURRENT_TIMESTAMP
         """, (
             item["id"], monitor_id, item["title"], item["brand"], item["price"],
@@ -249,24 +262,47 @@ def save_listings(monitor_id: int, items: list) -> int:
         if cursor.rowcount > 0:
             new_count += 1
 
-    # Add disappeared items (within boundary, not in new scrape) to queue
-    if pivot >= 0:
-        disappeared = []
-        for prev_id, info in prev_data.items():
-            if prev_id not in new_ids_set:
-                p = info["position"]
-                if p is not None and p <= pivot:
-                    disappeared.append(prev_id)
-        if disappeared:
-            ph = ", ".join(["?"] * len(disappeared))
-            cursor.execute(f"""
-                INSERT INTO verification_queue(id, url, queued_at, last_check)
-                SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                FROM listings
-                WHERE id IN ({ph})
-                ON CONFLICT(id) DO UPDATE SET
-                last_check = CURRENT_TIMESTAMP
-            """, disappeared)
+    # Collect absent items by category
+    immediate = []
+    deferred = []
+
+    for prev_id, info in prev_data.items():
+        if prev_id in new_ids_set:
+            continue
+        p = info["position"]
+        if p is None:
+            immediate.append(prev_id)
+        elif pivot < 0:
+            immediate.append(prev_id)
+        elif p <= pivot:
+            immediate.append(prev_id)
+        else:
+            deferred.append(prev_id)
+
+    # Enqueue immediate items (within pivot / null position / all when pivot < 0)
+    if immediate:
+        ph = ", ".join(["?"] * len(immediate))
+        cursor.execute(f"""
+            INSERT INTO verification_queue(id, url, queued_at, last_check)
+            SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM listings
+            WHERE id IN ({ph})
+            ON CONFLICT(id) DO UPDATE SET
+            last_check = CURRENT_TIMESTAMP
+        """, immediate)
+
+    # Enqueue deferred items (past pivot) only if absent for threshold days
+    if deferred:
+        ph = ", ".join(["?"] * len(deferred))
+        cursor.execute(f"""
+            INSERT INTO verification_queue(id, url, queued_at, last_check)
+            SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM listings
+            WHERE id IN ({ph})
+            AND julianday('now') - julianday(last_seen_at) >= ?
+            ON CONFLICT(id) DO UPDATE SET
+            last_check = CURRENT_TIMESTAMP
+        """, deferred + [QUEUE_ZOMBIE_THRESHOLD_DAYS])
 
     conn.commit()
     conn.close()

@@ -497,7 +497,7 @@ def run_monitor(monitor_id: int):
             progress_callback=progress_cb,
         )
 
-        new_count = save_listings(monitor_id, items)
+        new_count = save_listings(monitor_id, items, max_pages)
         update_monitor_last_scrape(monitor_id)
 
         avg_price = 0
