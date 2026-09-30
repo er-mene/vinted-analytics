@@ -209,6 +209,9 @@ def check_item_status(url: str) -> ItemStatus:
     if soup.find(attrs={"data-testid": "item-buy-button"}):
         return ItemStatus.ACTIVE
 
+    if soup.find(attrs={"data-testid": "item-status-content"}):
+        return ItemStatus.SOLD
+
     item_data = _get_item_status_data(response.text)
     if item_data.get("is_closed") and item_data.get("item_closing_action") == "sold":
         return ItemStatus.SOLD
