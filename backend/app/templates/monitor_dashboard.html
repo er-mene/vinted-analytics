@@ -288,10 +288,7 @@
         ['Total listings', data.summary.total_listings],
         ['Active listings', data.summary.active_listings],
         ['Sold listings', data.summary.sold_listings],
-        ['Average price', data.summary.avg_price],
-        ['Average likes', data.summary.avg_likes],
-        ['Price/likes corr.', data.correlations.price_likes],
-        ['Price/sell-time corr.', data.correlations.price_sell_time]
+        ['Average price', data.summary.avg_price]
       ];
       document.getElementById('cards').innerHTML = cards.map(([label, value]) => `
         <div class="card">

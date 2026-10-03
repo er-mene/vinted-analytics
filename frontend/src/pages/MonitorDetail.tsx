@@ -45,9 +45,6 @@ export default function MonitorDetail() {
 
   const s = data.summary;
   const avgPrice = s.avg_price !== null ? "€" + s.avg_price.toFixed(2) : "—";
-  const avgLikes = s.avg_likes !== null ? s.avg_likes.toFixed(1) : "—";
-  const rPL = data.correlations.price_likes !== null ? data.correlations.price_likes.toFixed(4) : "—";
-  const rST = data.correlations.price_sell_time !== null ? data.correlations.price_sell_time.toFixed(4) : "—";
 
   return (
     <div className="max-w-7xl mx-auto px-5 py-6">
@@ -75,9 +72,6 @@ export default function MonitorDetail() {
           ["Active", s.active_listings],
           ["Sold", s.sold_listings],
           ["Avg price", avgPrice],
-          ["Avg likes", avgLikes],
-          ["Price/likes r", rPL],
-          ["Price/sell-time r", rST],
         ].map(([label, value]) => (
           <div
             key={String(label)}
