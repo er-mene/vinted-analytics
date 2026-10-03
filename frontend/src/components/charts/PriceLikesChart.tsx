@@ -22,7 +22,20 @@ function jitter(val: number | null, id: number, spread: number): number {
   return val + (seed - 0.5) * spread * 2;
 }
 
-function CustomTooltip({ active, payload }: any) {
+interface TooltipPayloadItem {
+  payload: ListingPoint & {
+    originalPrice?: number | null;
+    originalLikes?: number | null;
+    originalTitle?: string;
+  };
+}
+
+interface CustomTooltipProps {
+  active?: boolean;
+  payload?: TooltipPayloadItem[];
+}
+
+function CustomTooltip({ active, payload }: CustomTooltipProps) {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
   const listed = fmtDate(d.listed_at);
@@ -36,6 +49,7 @@ function CustomTooltip({ active, payload }: any) {
         fontSize: 13,
         fontFamily: '"Helvetica Neue", Arial, sans-serif',
         maxWidth: 260,
+        pointerEvents: "none",
       }}
     >
       <div style={{ fontWeight: 700, marginBottom: 4, color: "#1f2937" }}>{d.originalTitle || d.title}</div>
@@ -48,19 +62,16 @@ function CustomTooltip({ active, payload }: any) {
       <div style={{ color: "#6b7280" }}>
         Listed: <strong>{listed}</strong>
       </div>
+      {d.url && (
+        <div style={{ marginTop: 6, fontSize: 11, color: "#0f766e", fontWeight: 600 }}>
+          Click dot to open listing &rarr;
+        </div>
+      )}
     </div>
   );
 }
 
 export default function PriceLikesChart({ data }: Props) {
-  if (!data.length) {
-    return (
-      <div className="h-[280px] flex items-center justify-center text-muted font-sans text-sm">
-        Not enough data yet.
-      </div>
-    );
-  }
-
   const jittered = useMemo(
     () =>
       data.map((d) => {
@@ -78,8 +89,24 @@ export default function PriceLikesChart({ data }: Props) {
     [data],
   );
 
-  const active = jittered.filter((d: any) => d.is_active);
-  const sold = jittered.filter((d: any) => !d.is_active);
+  const active = useMemo(() => jittered.filter((d) => d.is_active), [jittered]);
+  const sold = useMemo(() => jittered.filter((d) => !d.is_active), [jittered]);
+
+  const handleClick = (entry: unknown) => {
+    const item = entry as { url?: string; payload?: { url?: string } } | null;
+    const url = item?.payload?.url || item?.url;
+    if (url) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  };
+
+  if (!data.length) {
+    return (
+      <div className="h-[280px] flex items-center justify-center text-muted font-sans text-sm">
+        Not enough data yet.
+      </div>
+    );
+  }
 
   return (
     <ResponsiveContainer width="100%" height={280}>
@@ -116,12 +143,18 @@ export default function PriceLikesChart({ data }: Props) {
           data={active}
           fill="#0f766e"
           fillOpacity={0.5}
+          cursor="pointer"
+          className="cursor-pointer"
+          onClick={handleClick}
         />
         <Scatter
           name="Sold"
           data={sold}
           fill="#b45309"
           fillOpacity={0.5}
+          cursor="pointer"
+          className="cursor-pointer"
+          onClick={handleClick}
         />
       </ScatterChart>
     </ResponsiveContainer>

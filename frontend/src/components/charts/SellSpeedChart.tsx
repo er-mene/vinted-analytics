@@ -13,7 +13,16 @@ interface Props {
   data: SellSpeedPoint[];
 }
 
-function CustomTooltip({ active, payload }: any) {
+interface TooltipPayloadItem {
+  payload: SellSpeedPoint;
+}
+
+interface CustomTooltipProps {
+  active?: boolean;
+  payload?: TooltipPayloadItem[];
+}
+
+function CustomTooltip({ active, payload }: CustomTooltipProps) {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
   return (
@@ -26,6 +35,7 @@ function CustomTooltip({ active, payload }: any) {
         fontSize: 13,
         fontFamily: '"Helvetica Neue", Arial, sans-serif',
         maxWidth: 260,
+        pointerEvents: "none",
       }}
     >
       <div style={{ fontWeight: 700, marginBottom: 4, color: "#1f2937" }}>{d.title}</div>
@@ -35,11 +45,24 @@ function CustomTooltip({ active, payload }: any) {
       <div style={{ color: "#6b7280" }}>
         Time to sell: <strong>{Number(d.hours_to_sell).toFixed(1)}h</strong>
       </div>
+      {d.url && (
+        <div style={{ marginTop: 6, fontSize: 11, color: "#0f766e", fontWeight: 600 }}>
+          Click dot to open listing &rarr;
+        </div>
+      )}
     </div>
   );
 }
 
 export default function SellSpeedChart({ data }: Props) {
+  const handleClick = (entry: unknown) => {
+    const item = entry as { url?: string; payload?: { url?: string } } | null;
+    const url = item?.payload?.url || item?.url;
+    if (url) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  };
+
   if (!data.length) {
     return (
       <div className="h-[280px] flex items-center justify-center text-muted font-sans text-sm">
@@ -78,6 +101,9 @@ export default function SellSpeedChart({ data }: Props) {
           data={data}
           fill="#b45309"
           fillOpacity={0.6}
+          cursor="pointer"
+          className="cursor-pointer"
+          onClick={handleClick}
         />
       </ScatterChart>
     </ResponsiveContainer>

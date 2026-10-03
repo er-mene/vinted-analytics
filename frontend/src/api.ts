@@ -8,6 +8,7 @@ import type {
   MonitorCreateResponse,
   MonitorActionResponse,
   RunMonitorResponse,
+  ClearQueueResponse,
 } from "./types";
 
 const BASE = "/api";
@@ -99,5 +100,16 @@ export async function runMonitor(id: number): Promise<RunMonitorResponse> {
 export async function fetchMonitorProgress(id: number): Promise<{ current: number; total: number; running: boolean }> {
   const res = await fetch(`${BASE}/monitor/${id}/progress?_=${Date.now()}`);
   if (!res.ok) return { current: 0, total: 0, running: false };
+  return res.json();
+}
+
+export async function clearVerificationQueue(): Promise<ClearQueueResponse> {
+  const res = await fetch(`${BASE}/queue/clear`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `HTTP ${res.status}`);
+  }
   return res.json();
 }

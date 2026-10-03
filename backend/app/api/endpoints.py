@@ -18,6 +18,7 @@ from app.db.database import (
     get_monitors_with_stats,
     get_verification_queue_summary,
     get_verification_queue_items,
+    clear_verification_queue,
     get_recent_items,
     get_listings,
     update_monitor_last_scrape,
@@ -107,7 +108,7 @@ class MonitorCreate(BaseModel):
     minutes: int = 0
     seconds: int = 0
     max_pages: Optional[int] = None
-    page_delay_seconds: float = 4.0
+    page_delay_seconds: float = 6.0
     search_time_seconds: int = 5184000
     interval_days: int = 0
     interval_hours: int = 0
@@ -129,10 +130,12 @@ def add_monitor(monitor: MonitorCreate):
         monitor.seconds,
     )
 
+    page_delay = max(monitor.page_delay_seconds or 6.0, 5.0)
+
     id = create_monitor(
         monitor.name, monitor.query, monitor.brand_id,
         monitor.min_price, monitor.max_price, monitor.status_ids,
-        monitor.max_pages, monitor.page_delay_seconds, monitor.search_time_seconds,
+        monitor.max_pages, page_delay, monitor.search_time_seconds,
         interval_days, interval_hours, interval_minutes, interval_seconds,
     )
     
@@ -194,7 +197,7 @@ def run_monitor(monitor_id: int):
             
         status_ids = json.loads(m["status_ids"])
         max_pages = m.get("max_pages")
-        page_delay_seconds = m.get("page_delay_seconds") or 4.0
+        page_delay_seconds = max(m.get("page_delay_seconds") or 6.0, 5.0)
         search_time_seconds = m.get("search_time_seconds") or 5184000
         
         print(f"🔄 Running Monitor: {m['name']}...")
@@ -305,6 +308,8 @@ def edit_monitor(monitor_id: int, monitor: MonitorCreate):
         monitor.seconds,
     )
 
+    page_delay = max(monitor.page_delay_seconds, 5.0) if monitor.page_delay_seconds is not None else None
+
     update_monitor(
         monitor_id=monitor_id,
         name=monitor.name,
@@ -314,7 +319,7 @@ def edit_monitor(monitor_id: int, monitor: MonitorCreate):
         max_price=monitor.max_price,
         status_ids=monitor.status_ids,
         max_pages=monitor.max_pages,
-        page_delay_seconds=monitor.page_delay_seconds,
+        page_delay_seconds=page_delay,
         search_time_seconds=monitor.search_time_seconds,
         interval_days=interval_days,
         interval_hours=interval_hours,
@@ -368,6 +373,13 @@ def queue_items():
         {**summary, "items": items},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
+
+
+@router.post("/queue/clear")
+@router.delete("/queue")
+def clear_queue_items():
+    deleted = clear_verification_queue()
+    return {"message": "Verification queue cleared", "deleted": deleted}
 
 
 @router.get("/monitor/{monitor_id}/top")

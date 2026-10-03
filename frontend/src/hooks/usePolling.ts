@@ -1,13 +1,24 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 
 export function usePolling<T>(
   fetcher: () => Promise<T>,
   intervalMs: number,
-): { data: T | null; error: string | null; isLoading: boolean } {
+): {
+  data: T | null;
+  error: string | null;
+  isLoading: boolean;
+  refetch: () => void;
+  mutate: React.Dispatch<React.SetStateAction<T | null>>;
+} {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [pollIndex, setPollIndex] = useState(0);
   const mounted = useRef(true);
+
+  const refetch = useCallback(() => {
+    setPollIndex((i) => i + 1);
+  }, []);
 
   useEffect(() => {
     mounted.current = true;
@@ -34,7 +45,7 @@ export function usePolling<T>(
       mounted.current = false;
       clearInterval(id);
     };
-  }, [fetcher, intervalMs]);
+  }, [fetcher, intervalMs, pollIndex]);
 
-  return { data, error, isLoading };
+  return { data, error, isLoading, refetch, mutate: setData };
 }

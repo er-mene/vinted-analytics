@@ -168,3 +168,8 @@ export interface RunMonitorResponse {
   current_avg_price: number;
   total_active_scraped: number;
 }
+
+export interface ClearQueueResponse {
+  message: string;
+  deleted?: number;
+}

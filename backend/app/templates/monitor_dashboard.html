@@ -244,6 +244,29 @@
         ctx.arc(xFor(Number(point[xKey])), yFor(Number(point[yKey])), 4, 0, Math.PI * 2);
         ctx.fill();
       });
+
+      canvas.style.cursor = 'pointer';
+      canvas.onclick = (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        const clickX = (e.clientX - rect.left) * scaleX;
+        const clickY = (e.clientY - rect.top) * scaleY;
+        let closest = null;
+        let minDist = 15;
+        points.forEach(point => {
+          const px = xFor(Number(point[xKey]));
+          const py = yFor(Number(point[yKey]));
+          const dist = Math.hypot(clickX - px, clickY - py);
+          if (dist < minDist) {
+            minDist = dist;
+            closest = point;
+          }
+        });
+        if (closest && closest.url) {
+          window.open(closest.url, '_blank', 'noopener,noreferrer');
+        }
+      };
     }
 
     function formatValue(value) {

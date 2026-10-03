@@ -35,7 +35,7 @@ export default function CreateMonitorModal({ onClose, editMonitor }: Props) {
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [maxPages, setMaxPages] = useState(5);
-  const [pageDelay, setPageDelay] = useState(4);
+  const [pageDelay, setPageDelay] = useState(6);
   const [searchTime, setSearchTime] = useState(5184000);
   const [statusIds, setStatusIds] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -270,11 +270,11 @@ export default function CreateMonitorModal({ onClose, editMonitor }: Props) {
                   </label>
                   <input
                     type="number"
-                    min={0.5}
+                    min={5}
                     step={0.5}
                     value={pageDelay}
                     onChange={(e) => setPageDelay(Number(e.target.value))}
-                    placeholder="4"
+                    placeholder="6"
                     className="w-full border border-line rounded-xl px-3 py-2 bg-white/60 text-sm font-sans focus:outline-none focus:border-accent-2 transition-colors"
                   />
                 </div>

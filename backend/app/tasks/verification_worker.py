@@ -2,7 +2,14 @@ import time
 import random
 import logging
 import threading
-from app.db.database import get_items_to_verify, mark_item_as_sold, clear_queue, delete_listing, delete_from_queue
+from app.db.database import (
+    get_items_to_verify,
+    mark_item_as_sold,
+    clear_queue,
+    delete_listing,
+    delete_from_queue,
+    update_listing_listed_at,
+)
 from app.services.vinted_service import check_item_status, ItemStatus
 
 class VerificationWorker:
@@ -43,21 +50,27 @@ class VerificationWorker:
                     if not self.running:
                         break
                     try:
-                        status = check_item_status(item["url"])
+                        result = check_item_status(item["url"])
                     except Exception as e:
-                        logging.info("Verification failed for listing %s. ", item["id"])
+                        logging.info("Verification failed for listing %s: %s", item["id"], e)
                         continue
+
+                    status = getattr(result, "status", result)
+                    listed_at = getattr(result, "listed_at", None)
+
                     if status == ItemStatus.REMOVED:
                         delete_listing(item["id"])
                         logging.info("Listing %s removed.", item["id"])
                     elif status == ItemStatus.SOLD:
-                        mark_item_as_sold(item["id"])
-                        logging.info("Listing %s marked as sold.", item["id"])
+                        mark_item_as_sold(item["id"], listed_at=listed_at)
+                        logging.info("Listing %s marked as sold (listed_at: %s).", item["id"], listed_at)
                     elif status == ItemStatus.ERROR:
                         logging.warning("Verification failed for listing %s.", item["id"])
                     elif status == ItemStatus.ACTIVE:
+                        if listed_at:
+                            update_listing_listed_at(item["id"], listed_at)
                         delete_from_queue(item["id"])
-                        logging.info("Listing %s verified active – removed from queue.", item["id"])
+                        logging.info("Listing %s verified active – removed from queue (listed_at: %s).", item["id"], listed_at)
                     time.sleep(random.uniform(10, 15))
             except Exception:
                 logging.exception("Verification worker loop failed.")

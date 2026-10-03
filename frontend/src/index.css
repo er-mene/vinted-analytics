@@ -10,3 +10,18 @@ body {
     linear-gradient(180deg, #f7f2ea 0%, #f3efe7 100%);
   min-height: 100vh;
 }
+
+.recharts-scatter-symbol {
+  cursor: pointer;
+}
+
+.recharts-scatter-symbol .recharts-symbols {
+  cursor: pointer;
+  transition: opacity 0.15s ease, stroke 0.15s ease, stroke-width 0.15s ease;
+}
+
+.recharts-scatter-symbol:hover .recharts-symbols {
+  opacity: 1 !important;
+  stroke: #1f2937;
+  stroke-width: 2px;
+}
