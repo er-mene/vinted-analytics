@@ -2,11 +2,40 @@ import os
 import sqlite3
 import json
 from datetime import datetime
+from threading import TIMEOUT_MAX
+from apscheduler.schedulers.base import BaseScheduler, STATE_STOPPED
+from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.schedulers.background import BackgroundScheduler
+
+# Fix APScheduler 3.x shutdown race condition:
+# When shutdown() is called, the scheduler thread wakes up from _event.wait(),
+# but BlockingScheduler._main_loop does not check STATE_STOPPED before calling
+# _process_jobs(), attempting to submit due/overdue jobs to already closed executors.
+_orig_main_loop = BlockingScheduler._main_loop
+
+def _safe_main_loop(self):
+    wait_seconds = TIMEOUT_MAX
+    while self.state != STATE_STOPPED:
+        self._event.wait(wait_seconds)
+        self._event.clear()
+        if self.state == STATE_STOPPED:
+            break
+        wait_seconds = self._process_jobs()
+
+BlockingScheduler._main_loop = _safe_main_loop
+
+_orig_process_jobs = BaseScheduler._process_jobs
+
+def _safe_process_jobs(self):
+    if self.state == STATE_STOPPED:
+        return None
+    return _orig_process_jobs(self)
+
+BaseScheduler._process_jobs = _safe_process_jobs
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_NAME = os.path.join(BACKEND_DIR, "vinted_data.db")
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(job_defaults={"misfire_grace_time": None, "coalesce": True})
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)

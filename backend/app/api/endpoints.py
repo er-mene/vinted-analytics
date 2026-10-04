@@ -152,6 +152,8 @@ def add_monitor(monitor: MonitorCreate):
         next_run_time=datetime.now(),
         jitter=300,
         max_instances=1,
+        misfire_grace_time=None,
+        coalesce=True,
     )
     return {
         "message": "Monitor started",
