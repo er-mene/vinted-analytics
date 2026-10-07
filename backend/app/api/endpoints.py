@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 from datetime import datetime
+from apscheduler.jobstores.base import JobLookupError
 from app.db.database import (
     create_monitor,
     get_monitor,
@@ -57,6 +58,11 @@ def _monitor_lock(monitor_id: int) -> threading.Lock:
         if monitor_id not in _run_locks:
             _run_locks[monitor_id] = threading.Lock()
         return _run_locks[monitor_id]
+
+
+def _clear_run_lock(monitor_id: int):
+    with _run_locks_guard:
+        _run_locks.pop(monitor_id, None)
 
 
 def _normalize_monitor_interval(days: int, hours: int, minutes: int, seconds: int) -> tuple[int, int, int, int]:
@@ -296,7 +302,14 @@ def monitor_dashboard(monitor_id: int):
 @router.post("/monitor/delete")
 def delete_monitor_from_db(monitor_id: int):
     delete_monitor(monitor_id)
-    scheduler.remove_job(str(monitor_id))
+    try:
+        scheduler.remove_job(str(monitor_id))
+    except JobLookupError:
+        pass
+    except Exception as e:
+        logger.warning(f"Could not remove job for monitor {monitor_id} from scheduler: {e}")
+    _clear_run_lock(monitor_id)
+    _clear_progress(monitor_id)
     return {"message": f"Monitor {monitor_id} deleted"}
 
 
