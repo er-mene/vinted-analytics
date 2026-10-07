@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import json
+import time
 from datetime import datetime
 from threading import TIMEOUT_MAX
 from apscheduler.schedulers.base import BaseScheduler, STATE_STOPPED
@@ -76,6 +77,7 @@ def init_db():
             page_delay_seconds REAL DEFAULT 6.0,
             last_scrape TIMESTAMP,
             search_time_seconds INTEGER DEFAULT 5184000,
+            max_age REAL DEFAULT 7.0,
             interval_days INTEGER DEFAULT 0,
             interval_hours INTEGER DEFAULT 0,
             interval_minutes INTEGER DEFAULT 30,
@@ -83,9 +85,14 @@ def init_db():
         )
     ''')
 
+    try:
+        cursor.execute("ALTER TABLE monitors ADD COLUMN max_age REAL DEFAULT 7.0")
+    except sqlite3.OperationalError:
+        pass
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS verification_queue (
-            id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY REFERENCES listings(id) ON DELETE CASCADE,
             url TEXT UNIQUE,
             queued_at TIMESTAMP,
             last_check TIMESTAMP
@@ -96,23 +103,23 @@ def init_db():
     conn.close()
 
 
-def create_monitor(name, query, brand_id, min_price, max_price, status_ids=[], max_pages=None, page_delay_seconds=6.0, search_time_seconds=5184000, interval_days=0, interval_hours=0, interval_minutes=30, interval_seconds=0):
+def create_monitor(name, query, brand_id, min_price, max_price, status_ids=[], max_pages=None, page_delay_seconds=6.0, search_time_seconds=5184000, max_age=7.0, interval_days=0, interval_hours=0, interval_minutes=30, interval_seconds=0):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
     status_str = json.dumps(status_ids) if status_ids else "[]"
     
     cursor.execute('''
-        INSERT INTO monitors (name, query, brand_id, min_price, max_price, status_ids, max_pages, page_delay_seconds, search_time_seconds, interval_days, interval_hours, interval_minutes, interval_seconds)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (name, query, brand_id, min_price, max_price, status_str, max_pages, page_delay_seconds, search_time_seconds, interval_days, interval_hours, interval_minutes, interval_seconds))
+        INSERT INTO monitors (name, query, brand_id, min_price, max_price, status_ids, max_pages, page_delay_seconds, search_time_seconds, max_age, interval_days, interval_hours, interval_minutes, interval_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (name, query, brand_id, min_price, max_price, status_str, max_pages, page_delay_seconds, search_time_seconds, max_age, interval_days, interval_hours, interval_minutes, interval_seconds))
     
     monitor_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return monitor_id
 
-def update_monitor(monitor_id, name=None, query=None, brand_id=None, min_price=None, max_price=None, status_ids=None, max_pages=None, page_delay_seconds=None, search_time_seconds=None, interval_days=None, interval_hours=None, interval_minutes=None, interval_seconds=None):
+def update_monitor(monitor_id, name=None, query=None, brand_id=None, min_price=None, max_price=None, status_ids=None, max_pages=None, page_delay_seconds=None, search_time_seconds=None, max_age=None, interval_days=None, interval_hours=None, interval_minutes=None, interval_seconds=None):
     updates = {
         "name": name,
         "query": query,
@@ -123,6 +130,7 @@ def update_monitor(monitor_id, name=None, query=None, brand_id=None, min_price=N
         "max_pages": max_pages,
         "page_delay_seconds": page_delay_seconds,
         "search_time_seconds": search_time_seconds,
+        "max_age": max_age,
         "interval_days": interval_days,
         "interval_hours": interval_hours,
         "interval_minutes": interval_minutes,
@@ -180,16 +188,43 @@ def get_active_positions_for_monitor(monitor_id: int) -> dict[int, dict]:
 QUEUE_ZOMBIE_THRESHOLD_DAYS = 2
 
 
+def _is_item_older_than(item: dict, now_ts: float, max_age_seconds: float) -> bool:
+    ts = item.get("listed_at_ts")
+    if ts is not None:
+        return (now_ts - ts) > max_age_seconds
+    listed_at_str = item.get("listed_at")
+    if listed_at_str:
+        try:
+            dt = datetime.strptime(listed_at_str, "%Y-%m-%d %H:%M:%S")
+            return (now_ts - dt.timestamp()) > max_age_seconds
+        except Exception:
+            pass
+    return False
+
+
 def save_listings(monitor_id: int, items: list, max_pages: int | None = None) -> int:
     if not items:
+        return 0
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT max_age FROM monitors WHERE id = ?", (monitor_id,))
+    row = cursor.fetchone()
+    max_age = row[0] if row and row[0] is not None else 7.0
+
+    if max_age is not None:
+        now_ts = time.time()
+        max_age_seconds = float(max_age) * 86400.0
+        items = [i for i in items if not _is_item_older_than(i, now_ts, max_age_seconds)]
+
+    if not items:
+        conn.close()
         return 0
 
     prev_data = get_active_positions_for_monitor(monitor_id)
 
     new_ids_set = {item["id"] for item in items}
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
     new_count = 0
 
     # Find pivot: among items present in both scrapes with same price,
@@ -286,9 +321,9 @@ def save_listings(monitor_id: int, items: list, max_pages: int | None = None) ->
     conn.close()
     return new_count
 
-QUEUE_EXPIRATION = 7
+QUEUE_EXPIRATION = 7.0
 
-def clear_queue():
+def clear_queue(max_age: float | None = None):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
@@ -296,17 +331,19 @@ def clear_queue():
         WHERE id IN (
             SELECT id
             FROM verification_queue
-            WHERE julianday('now') - julianday(queued_at) >= ?
         )
-    ''', (QUEUE_EXPIRATION,))
+        AND julianday('now') - julianday(listed_at) >= COALESCE(
+            (SELECT max_age FROM monitors WHERE id = listings.monitor_id),
+            ?
+        )
+    ''', (max_age or QUEUE_EXPIRATION,))
     cursor.execute('''
         DELETE FROM verification_queue
-        WHERE id IN (
+        WHERE id NOT IN (
             SELECT id
-            FROM verification_queue
-            WHERE julianday('now') - julianday(queued_at) >= ?
+            FROM listings
         )
-    ''', (QUEUE_EXPIRATION,))
+    ''')
     conn.commit()
     conn.close()
 

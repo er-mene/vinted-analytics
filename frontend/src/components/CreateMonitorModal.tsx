@@ -37,6 +37,7 @@ export default function CreateMonitorModal({ onClose, editMonitor }: Props) {
   const [maxPages, setMaxPages] = useState(5);
   const [pageDelay, setPageDelay] = useState(6);
   const [searchTime, setSearchTime] = useState(5184000);
+  const [maxAge, setMaxAge] = useState(7);
   const [statusIds, setStatusIds] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -53,6 +54,7 @@ export default function CreateMonitorModal({ onClose, editMonitor }: Props) {
       setMaxPages(editMonitor.max_pages ?? 5);
       setPageDelay(editMonitor.page_delay_seconds);
       setSearchTime(editMonitor.search_time_seconds ?? 5184000);
+      setMaxAge(editMonitor.max_age ?? 7);
       setStatusIds(editMonitor.status_ids ?? []);
     }
   }, [editMonitor]);
@@ -80,6 +82,7 @@ export default function CreateMonitorModal({ onClose, editMonitor }: Props) {
         max_pages: maxPages || null,
         page_delay_seconds: pageDelay,
         search_time_seconds: searchTime,
+        max_age: maxAge,
         status_ids: statusIds,
       };
       if (brandId) payload.brand_id = Number(brandId);
@@ -225,21 +228,37 @@ export default function CreateMonitorModal({ onClose, editMonitor }: Props) {
                   />
                 </div>
               </div>
-              <div>
-                <label className="font-sans text-xs text-muted block mb-1">
-                  Time range
-                </label>
-                <select
-                  value={searchTime}
-                  onChange={(e) => setSearchTime(Number(e.target.value))}
-                  className="w-full border border-line rounded-xl px-3 py-2 bg-white/60 text-sm font-sans focus:outline-none focus:border-accent-2 transition-colors"
-                >
-                  {TIME_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label className="font-sans text-xs text-muted block mb-1">
+                    Time range
+                  </label>
+                  <select
+                    value={searchTime}
+                    onChange={(e) => setSearchTime(Number(e.target.value))}
+                    className="w-full border border-line rounded-xl px-3 py-2 bg-white/60 text-sm font-sans focus:outline-none focus:border-accent-2 transition-colors"
+                  >
+                    {TIME_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex-1">
+                  <label className="font-sans text-xs text-muted block mb-1">
+                    Max age (days)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={maxAge}
+                    onChange={(e) => setMaxAge(Number(e.target.value))}
+                    placeholder="7"
+                    className="w-full border border-line rounded-xl px-3 py-2 bg-white/60 text-sm font-sans focus:outline-none focus:border-accent-2 transition-colors"
+                  />
+                </div>
               </div>
             </div>
           </details>

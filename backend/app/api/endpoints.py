@@ -110,6 +110,7 @@ class MonitorCreate(BaseModel):
     max_pages: Optional[int] = None
     page_delay_seconds: float = 6.0
     search_time_seconds: int = 5184000
+    max_age: float = 7.0
     interval_days: int = 0
     interval_hours: int = 0
     interval_minutes: int = 30
@@ -136,6 +137,7 @@ def add_monitor(monitor: MonitorCreate):
         monitor.name, monitor.query, monitor.brand_id,
         monitor.min_price, monitor.max_price, monitor.status_ids,
         monitor.max_pages, page_delay, monitor.search_time_seconds,
+        monitor.max_age,
         interval_days, interval_hours, interval_minutes, interval_seconds,
     )
     
@@ -200,7 +202,8 @@ def run_monitor(monitor_id: int):
         status_ids = json.loads(m["status_ids"])
         max_pages = m.get("max_pages")
         page_delay_seconds = max(m.get("page_delay_seconds") or 6.0, 5.0)
-        search_time_seconds = m.get("search_time_seconds") or 5184000
+        max_age = m.get("max_age") or 7.0
+        search_time_seconds = min(m.get("search_time_seconds") or 5184000, int(max_age * 86400))
         
         print(f"🔄 Running Monitor: {m['name']}...")
 
@@ -323,6 +326,7 @@ def edit_monitor(monitor_id: int, monitor: MonitorCreate):
         max_pages=monitor.max_pages,
         page_delay_seconds=page_delay,
         search_time_seconds=monitor.search_time_seconds,
+        max_age=monitor.max_age,
         interval_days=interval_days,
         interval_hours=interval_hours,
         interval_minutes=interval_minutes,

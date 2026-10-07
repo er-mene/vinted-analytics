@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
     yield
     verification_worker.stop()
     if scheduler.running:
-        scheduler.shutdown(wait=False)
+        scheduler.shutdown(wait=True)
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(api_router, prefix="/api")

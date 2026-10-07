@@ -9,6 +9,7 @@ export interface Monitor {
   max_pages: number | null;
   page_delay_seconds: number;
   search_time_seconds: number;
+  max_age?: number;
   interval_days: number;
   interval_hours: number;
   interval_minutes: number;
@@ -143,6 +144,7 @@ export interface MonitorCreatePayload {
   max_pages?: number | null;
   page_delay_seconds?: number;
   search_time_seconds?: number;
+  max_age?: number;
 }
 
 export interface MonitorCreateResponse {
