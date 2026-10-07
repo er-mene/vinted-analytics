@@ -1,22 +1,43 @@
+import logging
 import random
 import re
 import time
 import threading
 from enum import Enum
 from curl_cffi import requests
+from curl_cffi.requests.exceptions import Timeout, RequestException
 from datetime import datetime, timedelta
 from typing import List
 from bs4 import BeautifulSoup
 
+logger = logging.getLogger(__name__)
+
 VINTED_BASE_URL = "https://www.vinted.it"
 VINTED_CATALOG_URL = "https://api.vinted.it/svc-catalogue/items"
+CONNECT_TIMEOUT = 5.0
+READ_TIMEOUT = 10.0
+DEFAULT_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
 
 _session_local = threading.local()
 
 def get_vinted_session():
     if not hasattr(_session_local, "session"):
-        _session_local.session = requests.Session(impersonate="safari")
-        _session_local.session.get(VINTED_BASE_URL)
+        session = requests.Session(impersonate="safari")
+        try:
+            # Timeout esplicito (connect=5s, read=10s)
+            response = session.get(VINTED_BASE_URL, timeout=DEFAULT_TIMEOUT)
+            response.raise_for_status()
+            _session_local.session = session
+        except Timeout as exc:
+            logger.error("Timeout during Vinted session warm-up: %s", exc)
+            # Rilascia/chiudi la sessione ed evita di salvare uno stato corrotto
+            session.close()
+            raise
+        except RequestException as exc:
+            logger.error("Network error during session warm-up: %s", exc)
+            session.close()
+            raise
+            
     return _session_local.session
 
 def _get_api_headers(session):
@@ -103,12 +124,12 @@ def search_vinted(
     session = get_vinted_session()
     effective_delay = max(page_delay_seconds or DEFAULT_PAGE_DELAY_SECONDS, MIN_PAGE_DELAY_SECONDS)
 
-    print(f"🕵️  Scraping Vinted for: {query} (page delay: ~{effective_delay:.1f}s)...")
+    logger.info(f"🕵️  Scraping Vinted for: {query} (page delay: ~{effective_delay:.1f}s)...")
 
     try:
         session.get(f"{VINTED_BASE_URL}/")
     except Exception as e:
-        print(f"❌ Connection Error (Cookies): {e}")
+        logger.error(f"❌ Connection Error (Cookies): {e}")
         return []
 
     # Realistic pause after establishing session before querying the catalogue
@@ -147,10 +168,13 @@ def search_vinted(
                 timeout=30,
             )
         except Exception as e:
-            print(f"❌ Connection Error (API page {page_num}): {e}")
+            logger.error(f"❌ Connection Error (API page {page_num}): {e}")
             return None
 
         if response.status_code in (401, 403):
+            logger.warning(
+                f"⚠️ Received status {response.status_code} on page {page_num}, attempting cookie refresh"
+            )
             # Attempt to refresh session cookies once
             try:
                 session.get(f"{VINTED_BASE_URL}/")
@@ -161,11 +185,11 @@ def search_vinted(
                     params={**params, "page": page_num},
                     timeout=30,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed session refresh on page {page_num}: {e}")
 
         if response.status_code != 200:
-            print(
+            logger.error(
                 f"❌ BLOCK DETECTED on page {page_num}: Status Code {response.status_code}"
             )
             return None
@@ -173,7 +197,7 @@ def search_vinted(
         try:
             return response.json()
         except Exception as e:
-            print(f"❌ JSON Error on page {page_num}: {e}")
+            logger.error(f"❌ JSON Error on page {page_num}: {e}")
             return None
 
     data = _fetch_page(1)
@@ -194,17 +218,17 @@ def search_vinted(
             seen_ids.add(parsed["id"])
             clean_items.append(parsed)
         except Exception as e:
-            print(f"⚠️ skipped item {item.get('id')} due to error: {e}")
+            logger.warning(f"⚠️ skipped item {item.get('id')} due to error: {e}")
             continue
 
     if progress_callback:
         progress_callback(1, pages_to_fetch)
 
-    print(f"✅ Page 1/{pages_to_fetch}: {len(raw_items)} raw ({len(clean_items)} kept)")
+    logger.info(f"✅ Page 1/{pages_to_fetch}: {len(raw_items)} raw ({len(clean_items)} kept)")
 
     for page in range(2, pages_to_fetch + 1):
         delay = random.uniform(effective_delay * 0.85, effective_delay * 1.35)
-        print(f"⏳ Waiting {delay:.1f}s before page {page}...")
+        logger.info(f"⏳ Waiting {delay:.1f}s before page {page}...")
         time.sleep(delay)
 
         data = _fetch_page(page)
@@ -224,7 +248,7 @@ def search_vinted(
                 clean_items.append(parsed)
                 new_on_page += 1
             except Exception as e:
-                print(
+                logger.warning(
                     f"⚠️ skipped item {item.get('id')} on page {page} due to error: {e}"
                 )
                 continue
@@ -232,7 +256,7 @@ def search_vinted(
         if progress_callback:
             progress_callback(page, pages_to_fetch)
 
-        print(
+        logger.info(
             f"✅ Page {page}/{pages_to_fetch}: {len(page_raw)} raw, "
             f"{new_on_page} new (total {len(clean_items)})"
         )
@@ -245,7 +269,7 @@ def search_vinted(
             if i["listed_at_ts"] is None or (now - i["listed_at_ts"]) <= search_time_seconds
         ]
 
-    print(
+    logger.info(
         f"🏁 Finished parsing. Returning {len(clean_items)} valid items "
         f"across {pages_to_fetch} pages."
     )
@@ -437,15 +461,19 @@ def check_item_status(url: str) -> ItemVerificationResult:
     if url and not url.startswith("http"):
         url = f"{VINTED_BASE_URL}{url}"
 
+    logger.debug(f"Verifying item status for: {url}")
     session = get_vinted_session()
 
     try:
         response = session.get(url, timeout=30)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Connection error verifying item status for {url}: {e}")
         return ItemVerificationResult(ItemStatus.ERROR)
     if response.status_code == 404:
+        logger.info(f"Item {url} returned 404, marked as REMOVED")
         return ItemVerificationResult(ItemStatus.REMOVED)
     if response.status_code >= 400:
+        logger.warning(f"Item {url} returned HTTP {response.status_code}, status ERROR")
         return ItemVerificationResult(ItemStatus.ERROR)
 
     html = response.text
@@ -457,52 +485,57 @@ def check_item_status(url: str) -> ItemVerificationResult:
 
     try:
         soup = BeautifulSoup(html, "html.parser")
-    except Exception:
+    except Exception as e:
+        logger.warning(f"HTML parse error for {url}: {e}")
         return ItemVerificationResult(ItemStatus.ERROR, listed_at=listed_at, upload_date_raw=upload_date_raw)
+
+    def _resolved(status: ItemStatus) -> ItemVerificationResult:
+        logger.debug(f"Item status for {url} resolved to {status.value} (listed_at: {listed_at})")
+        return ItemVerificationResult(status, listed_at=listed_at, upload_date_raw=upload_date_raw)
 
     # 1. Definite ACTIVE signals: Buy button exists
     if soup.find(attrs={"data-testid": "item-buy-button"}):
-        return ItemVerificationResult(ItemStatus.ACTIVE, listed_at=listed_at, upload_date_raw=upload_date_raw)
+        return _resolved(ItemStatus.ACTIVE)
 
     # 2. Status banners / badges in HTML (e.g. green 'web_ui__Cell__success' badge)
     success_cells = soup.find_all(class_=lambda x: x and "web_ui__Cell__success" in x)
     for cell in success_cells:
         txt = cell.get_text(strip=True).lower()
         if any(w in txt for w in SOLD_STATUS_KEYWORDS) or any(w in txt for w in RESERVED_STATUS_KEYWORDS):
-            return ItemVerificationResult(ItemStatus.SOLD, listed_at=listed_at, upload_date_raw=upload_date_raw)
+            return _resolved(ItemStatus.SOLD)
 
     # Legacy or specific data-testid
     if soup.find(attrs={"data-testid": "item-status-content"}):
-        return ItemVerificationResult(ItemStatus.SOLD, listed_at=listed_at, upload_date_raw=upload_date_raw)
+        return _resolved(ItemStatus.SOLD)
 
     # Status elements in sidebar / badges
     for el in soup.find_all(["div", "span", "p"], class_=lambda x: x and any(c in x for c in ["Cell", "status", "Badge", "badge", "banner"])):
         txt = el.get_text(strip=True).lower()
         if txt in SOLD_STATUS_KEYWORDS or txt in RESERVED_STATUS_KEYWORDS:
-            return ItemVerificationResult(ItemStatus.SOLD, listed_at=listed_at, upload_date_raw=upload_date_raw)
+            return _resolved(ItemStatus.SOLD)
 
     # 3. Check JSON state embedded in the page
     item_data = _get_item_status_data(html)
 
     if item_data.get("item_closing_action") == "sold":
-        return ItemVerificationResult(ItemStatus.SOLD, listed_at=listed_at, upload_date_raw=upload_date_raw)
+        return _resolved(ItemStatus.SOLD)
     if item_data.get("item_closing_action") in ("removed", "deleted"):
-        return ItemVerificationResult(ItemStatus.REMOVED, listed_at=listed_at, upload_date_raw=upload_date_raw)
+        return _resolved(ItemStatus.REMOVED)
 
     if item_data.get("is_closed") or item_data.get("is_reserved"):
-        return ItemVerificationResult(ItemStatus.SOLD, listed_at=listed_at, upload_date_raw=upload_date_raw)
+        return _resolved(ItemStatus.SOLD)
 
     if item_data.get("all_cannot_buy"):
-        return ItemVerificationResult(ItemStatus.SOLD, listed_at=listed_at, upload_date_raw=upload_date_raw)
+        return _resolved(ItemStatus.SOLD)
 
     # 4. Secondary active signals
     if soup.find(attrs={"data-testid": "item-buyer-offer-button"}):
-        return ItemVerificationResult(ItemStatus.ACTIVE, listed_at=listed_at, upload_date_raw=upload_date_raw)
+        return _resolved(ItemStatus.ACTIVE)
 
     if item_data.get("can_buy") is True:
-        return ItemVerificationResult(ItemStatus.ACTIVE, listed_at=listed_at, upload_date_raw=upload_date_raw)
+        return _resolved(ItemStatus.ACTIVE)
 
     # 5. If no buy buttons exist and can_buy is not True, the item is not purchasable
-    return ItemVerificationResult(ItemStatus.SOLD, listed_at=listed_at, upload_date_raw=upload_date_raw)
+    return _resolved(ItemStatus.SOLD)
 
     
