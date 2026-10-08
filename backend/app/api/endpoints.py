@@ -5,13 +5,12 @@ from pydantic import BaseModel
 from typing import Optional, List
 import json
 import logging
-import threading
-from datetime import datetime
-from apscheduler.jobstores.base import JobLookupError
+from datetime import datetime, timezone
 from app.db.database import (
     create_monitor,
     get_monitor,
     update_monitor,
+    set_monitor_active,
     save_listings,
     get_monitors_list,
     delete_monitor,
@@ -23,46 +22,13 @@ from app.db.database import (
     get_recent_items,
     get_listings,
     update_monitor_last_scrape,
-    scheduler,
 )
 from app.services.vinted_service import search_vinted
+from app.tasks.vinted_worker import vinted_worker
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 MIN_MONITOR_INTERVAL_SECONDS = 30 * 60
-
-_run_locks: dict[int, threading.Lock] = {}
-_run_locks_guard = threading.Lock()
-
-_progress: dict[int, dict] = {}
-_progress_guard = threading.Lock()
-
-
-def _set_progress(monitor_id: int, current: int, total: int):
-    with _progress_guard:
-        _progress[monitor_id] = {"current": current, "total": total}
-
-
-def _get_progress(monitor_id: int) -> dict | None:
-    with _progress_guard:
-        return _progress.get(monitor_id)
-
-
-def _clear_progress(monitor_id: int):
-    with _progress_guard:
-        _progress.pop(monitor_id, None)
-
-
-def _monitor_lock(monitor_id: int) -> threading.Lock:
-    with _run_locks_guard:
-        if monitor_id not in _run_locks:
-            _run_locks[monitor_id] = threading.Lock()
-        return _run_locks[monitor_id]
-
-
-def _clear_run_lock(monitor_id: int):
-    with _run_locks_guard:
-        _run_locks.pop(monitor_id, None)
 
 
 def _normalize_monitor_interval(days: int, hours: int, minutes: int, seconds: int) -> tuple[int, int, int, int]:
@@ -145,24 +111,11 @@ def add_monitor(monitor: MonitorCreate):
         monitor.max_pages, page_delay, monitor.search_time_seconds,
         monitor.max_age,
         interval_days, interval_hours, interval_minutes, interval_seconds,
+        is_active=1,
     )
     
-    scheduler.add_job(
-        run_monitor,
-        "interval",
-        days=interval_days,
-        hours=interval_hours,
-        minutes=interval_minutes,
-        seconds=interval_seconds,
-        args=[id],
-        id=str(id),
-        replace_existing=True,
-        next_run_time=datetime.now(),
-        jitter=300,
-        max_instances=1,
-        misfire_grace_time=None,
-        coalesce=True,
-    )
+    vinted_worker.on_monitor_added(id)
+
     return {
         "message": "Monitor started",
         "monitor_id": id,
@@ -179,85 +132,29 @@ def add_monitor(monitor: MonitorCreate):
 def pause_monitor(monitor_id: int):
     if not get_monitor(monitor_id): 
         raise HTTPException(status_code=404, detail="Monitor not found")
-    scheduler.pause_job(f"{monitor_id}")
+    set_monitor_active(monitor_id, 0)
+    vinted_worker.on_monitor_updated(monitor_id)
     return {"message": "Monitor paused", "monitor_id": monitor_id}
 
 @router.patch("/monitor/resume")
 def resume_monitor(monitor_id: int):
     if not get_monitor(monitor_id):
         raise HTTPException(status_code=404, detail="Monitor not found")
-    scheduler.resume_job(f"{monitor_id}")
+    set_monitor_active(monitor_id, 1)
+    vinted_worker.on_monitor_updated(monitor_id)
     return {"message": "Monitor resumed", "monitor_id": monitor_id}
 
-# Need to move run_monitor here.
 @router.get("/monitor/{monitor_id}/run")
 def run_monitor(monitor_id: int):
-    """
-    Runs the specific monitor
-    """
-    lock = _monitor_lock(monitor_id)
-    if not lock.acquire(blocking=False):
-        msg = f"Monitor {monitor_id} is already running, skipping this invocation"
-        logger.warning(msg)
-        return {"message": msg}
-    try:
-        m = get_monitor(monitor_id)
-        if not m:
-            raise HTTPException(status_code=404, detail="Monitor not found")
-            
-        status_ids = json.loads(m["status_ids"])
-        max_pages = m.get("max_pages")
-        page_delay_seconds = max(m.get("page_delay_seconds") or 6.0, 5.0)
-        max_age = m.get("max_age") or 7.0
-        search_time_seconds = min(m.get("search_time_seconds") or 5184000, int(max_age * 86400))
-        
-        print(f"🔄 Running Monitor: {m['name']}...")
-
-        def progress_cb(current: int, total: int):
-            _set_progress(monitor_id, current, total)
-
-        _set_progress(monitor_id, 0, 1)
-        items = search_vinted(
-            query=m["query"],
-            brand_id=m["brand_id"],
-            min_price=m["min_price"],
-            max_price=m["max_price"],
-            status_ids=status_ids,
-            max_pages=max_pages,
-            page_delay_seconds=page_delay_seconds,
-            search_time_seconds=search_time_seconds,
-            progress_callback=progress_cb,
-        )
-
-        new_count = save_listings(monitor_id, items, max_pages)
-        update_monitor_last_scrape(monitor_id)
-
-        avg_price = 0
-        if items:
-            total = sum(i['price'] for i in items)
-            avg_price = round(total / len(items), 2)
-        
-        return {
-            "monitor": m["name"],
-            "new_items_found": new_count,
-            "current_avg_price": avg_price,
-            "total_active_scraped": len(items),
-            "items": items
-        }
-    except Exception as e:
-        logger.exception(f"Job {monitor_id} failed: {e}")
-        raise
-    finally:
-        _clear_progress(monitor_id)
-        lock.release()
+    return JSONResponse(
+        {"message": "Manual runs are disabled in scheduled queue mode. Monitors run automatically on schedule."},
+        status_code=400,
+    )
 
 
 @router.get("/monitor/{monitor_id}/progress")
 def monitor_progress(monitor_id: int):
-    p = _get_progress(monitor_id)
-    if p is None:
-        return {"current": 0, "total": 0, "running": False}
-    return {**p, "running": True}
+    return vinted_worker.get_progress(monitor_id)
 
 
 @router.get("/monitor/{monitor_id}/analytics")
@@ -302,14 +199,7 @@ def monitor_dashboard(monitor_id: int):
 @router.post("/monitor/delete")
 def delete_monitor_from_db(monitor_id: int):
     delete_monitor(monitor_id)
-    try:
-        scheduler.remove_job(str(monitor_id))
-    except JobLookupError:
-        pass
-    except Exception as e:
-        logger.warning(f"Could not remove job for monitor {monitor_id} from scheduler: {e}")
-    _clear_run_lock(monitor_id)
-    _clear_progress(monitor_id)
+    vinted_worker.on_monitor_deleted(monitor_id)
     return {"message": f"Monitor {monitor_id} deleted"}
 
 
@@ -346,14 +236,7 @@ def edit_monitor(monitor_id: int, monitor: MonitorCreate):
         interval_seconds=interval_seconds,
     )
 
-    scheduler.reschedule_job(
-        str(monitor_id),
-        trigger="interval",
-        days=interval_days,
-        hours=interval_hours,
-        minutes=interval_minutes,
-        seconds=interval_seconds,
-    )
+    vinted_worker.on_monitor_updated(monitor_id)
 
     return {
         "message": "Monitor updated",
@@ -373,11 +256,15 @@ def edit_monitor(monitor_id: int, monitor: MonitorCreate):
 @router.get("/overview")
 def overview():
     monitors = get_monitors_with_stats()
-    jobs = {j.id: j for j in scheduler.get_jobs()}
     for m in monitors:
-        j = jobs.get(str(m["id"]))
-        m["next_run_time"] = str(j.next_run_time) if j and j.next_run_time else None
-        m["paused"] = j and j.next_run_time is None
+        next_run_ts = vinted_worker.get_next_run(m["id"])
+        is_active = bool(m.get("is_active", 1))
+        m["next_run_time"] = (
+            datetime.fromtimestamp(next_run_ts, tz=timezone.utc).isoformat()
+            if next_run_ts and is_active
+            else None
+        )
+        m["paused"] = not is_active
     return JSONResponse(
         {"monitors": monitors, "queue": get_verification_queue_summary()},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},

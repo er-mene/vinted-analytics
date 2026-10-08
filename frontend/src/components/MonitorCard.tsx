@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import type { Monitor, RecentItem } from "../types";
-import { fetchRecentItems, stopMonitor, resumeMonitor, runMonitor, deleteMonitorFromApi, fetchMonitorProgress } from "../api";
+import { fetchRecentItems, stopMonitor, resumeMonitor, deleteMonitorFromApi, fetchMonitorProgress } from "../api";
 import { fmtDate, fmtDateTime } from "../utils";
 
 function formatCountdown(seconds: number): string {
-  if (seconds <= 0) return "Running…";
+  if (seconds <= 0) return "Due soon…";
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   if (m > 0) return `${m}m ${s}s`;
@@ -54,26 +54,32 @@ export default function MonitorCard({ monitor, onEdit }: { monitor: Monitor; onE
   }, [monitor.id]);
 
   useEffect(() => {
-    if (!running) {
-      setProgress(null);
-      return;
-    }
+    let mounted = true;
     const poll = async () => {
       try {
         const p = await fetchMonitorProgress(monitor.id);
-        if (p.running) setProgress({ current: p.current, total: p.total });
+        if (!mounted) return;
+        if (p.running) {
+          setRunning(true);
+          setProgress({ current: p.current, total: p.total });
+        } else {
+          setRunning(false);
+          setProgress(null);
+        }
       } catch { /* ignore */ }
     };
     poll();
-    const id = setInterval(poll, 1500);
-    return () => clearInterval(id);
-  }, [monitor.id, running]);
+    const id = setInterval(poll, 3000);
+    return () => { mounted = false; clearInterval(id); };
+  }, [monitor.id]);
 
   const statusBadge = isPaused
     ? "bg-yellow/10 text-yellow"
+    : running
+    ? "bg-accent/10 text-accent animate-pulse"
     : "bg-green/10 text-green";
 
-  const statusLabel = isPaused ? "Paused" : "Active";
+  const statusLabel = isPaused ? "Paused" : running ? "Scraping" : "Active";
 
   const avgPrice =
     monitor.avg_price !== null
@@ -81,18 +87,6 @@ export default function MonitorCard({ monitor, onEdit }: { monitor: Monitor; onE
       : "—";
 
   const lastScrape = fmtDateTime(monitor.last_scrape);
-
-  const handleRun = async () => {
-    setRunning(true);
-    setActionMsg(null);
-    try {
-      const res = await runMonitor(monitor.id);
-      setActionMsg(`${res.new_items_found} new · avg €${res.current_avg_price}`);
-    } catch {
-      setActionMsg("Run failed");
-    }
-    setRunning(false);
-  };
 
   const handleTogglePause = async () => {
     setActionMsg(null);
@@ -140,7 +134,13 @@ export default function MonitorCard({ monitor, onEdit }: { monitor: Monitor; onE
 
       <div className="font-sans text-sm mb-1">
         <span className="text-muted">Next run: </span>
-        <span className="font-mono font-semibold text-ink">{countdown}</span>
+        <span className="font-mono font-semibold text-ink">
+          {running
+            ? progress && progress.total > 0
+              ? `Scraping page ${progress.current}/${progress.total}…`
+              : "Scraping in progress…"
+            : countdown}
+        </span>
       </div>
       <div className="font-sans text-sm mb-3">
         <span className="text-muted">Last scrape: </span>
@@ -169,17 +169,6 @@ export default function MonitorCard({ monitor, onEdit }: { monitor: Monitor; onE
           className="font-sans text-xs font-semibold text-accent-2 border border-accent-2/40 hover:bg-accent-2/10 px-3 py-1.5 rounded-xl transition-colors"
         >
           Edit
-        </button>
-        <button
-          onClick={handleRun}
-          disabled={running}
-          className="font-sans text-xs font-semibold text-white bg-accent/80 hover:bg-accent disabled:opacity-50 px-3 py-1.5 rounded-xl transition-colors"
-        >
-          {running
-            ? progress
-              ? `Page ${progress.current}/${progress.total}`
-              : "Running…"
-            : "Run"}
         </button>
         <button
           onClick={handleTogglePause}

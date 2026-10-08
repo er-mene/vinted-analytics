@@ -8,20 +8,16 @@ if _backend_dir not in sys.path:
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import logging
-from app.db.database import init_db, scheduler
+from app.db.database import init_db
 from app.api import router as api_router
-from app.api.endpoints import run_monitor
-from app.tasks.verification_worker import verification_worker
+from app.tasks.vinted_worker import vinted_worker
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    scheduler.start()
-    verification_worker.start()
+    vinted_worker.start()
     yield
-    verification_worker.stop()
-    if scheduler.running:
-        scheduler.shutdown(wait=True)
+    vinted_worker.stop()
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(api_router, prefix="/api")

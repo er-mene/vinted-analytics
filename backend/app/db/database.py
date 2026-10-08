@@ -3,45 +3,13 @@ import sqlite3
 import json
 import time
 from datetime import datetime
-from threading import TIMEOUT_MAX
-from apscheduler.schedulers.base import BaseScheduler, STATE_STOPPED
-from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.schedulers.background import BackgroundScheduler
-
-# Fix APScheduler 3.x shutdown race condition:
-# When shutdown() is called, the scheduler thread wakes up from _event.wait(),
-# but BlockingScheduler._main_loop does not check STATE_STOPPED before calling
-# _process_jobs(), attempting to submit due/overdue jobs to already closed executors.
-_orig_main_loop = BlockingScheduler._main_loop
-
-def _safe_main_loop(self):
-    wait_seconds = TIMEOUT_MAX
-    while self.state != STATE_STOPPED:
-        self._event.wait(wait_seconds)
-        self._event.clear()
-        if self.state == STATE_STOPPED:
-            break
-        wait_seconds = self._process_jobs()
-
-BlockingScheduler._main_loop = _safe_main_loop
-
-_orig_process_jobs = BaseScheduler._process_jobs
-
-def _safe_process_jobs(self):
-    if self.state == STATE_STOPPED:
-        return None
-    return _orig_process_jobs(self)
-
-BaseScheduler._process_jobs = _safe_process_jobs
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_NAME = os.path.join(BACKEND_DIR, "vinted_data.db")
-scheduler = BackgroundScheduler(job_defaults={"misfire_grace_time": None, "coalesce": True})
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     conn.execute("PRAGMA journal_mode=WAL;")
-    scheduler.add_jobstore("sqlalchemy", url=f"sqlite:///{DB_NAME}")
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -81,12 +49,18 @@ def init_db():
             interval_days INTEGER DEFAULT 0,
             interval_hours INTEGER DEFAULT 0,
             interval_minutes INTEGER DEFAULT 30,
-            interval_seconds INTEGER DEFAULT 0
+            interval_seconds INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1
         )
     ''')
 
     try:
         cursor.execute("ALTER TABLE monitors ADD COLUMN max_age REAL DEFAULT 7.0")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE monitors ADD COLUMN is_active INTEGER DEFAULT 1")
     except sqlite3.OperationalError:
         pass
 
@@ -103,23 +77,23 @@ def init_db():
     conn.close()
 
 
-def create_monitor(name, query, brand_id, min_price, max_price, status_ids=[], max_pages=None, page_delay_seconds=6.0, search_time_seconds=5184000, max_age=7.0, interval_days=0, interval_hours=0, interval_minutes=30, interval_seconds=0):
+def create_monitor(name, query, brand_id, min_price, max_price, status_ids=[], max_pages=None, page_delay_seconds=6.0, search_time_seconds=5184000, max_age=7.0, interval_days=0, interval_hours=0, interval_minutes=30, interval_seconds=0, is_active=1):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
     status_str = json.dumps(status_ids) if status_ids else "[]"
     
     cursor.execute('''
-        INSERT INTO monitors (name, query, brand_id, min_price, max_price, status_ids, max_pages, page_delay_seconds, search_time_seconds, max_age, interval_days, interval_hours, interval_minutes, interval_seconds)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (name, query, brand_id, min_price, max_price, status_str, max_pages, page_delay_seconds, search_time_seconds, max_age, interval_days, interval_hours, interval_minutes, interval_seconds))
+        INSERT INTO monitors (name, query, brand_id, min_price, max_price, status_ids, max_pages, page_delay_seconds, search_time_seconds, max_age, interval_days, interval_hours, interval_minutes, interval_seconds, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (name, query, brand_id, min_price, max_price, status_str, max_pages, page_delay_seconds, search_time_seconds, max_age, interval_days, interval_hours, interval_minutes, interval_seconds, is_active))
     
     monitor_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return monitor_id
 
-def update_monitor(monitor_id, name=None, query=None, brand_id=None, min_price=None, max_price=None, status_ids=None, max_pages=None, page_delay_seconds=None, search_time_seconds=None, max_age=None, interval_days=None, interval_hours=None, interval_minutes=None, interval_seconds=None):
+def update_monitor(monitor_id, name=None, query=None, brand_id=None, min_price=None, max_price=None, status_ids=None, max_pages=None, page_delay_seconds=None, search_time_seconds=None, max_age=None, interval_days=None, interval_hours=None, interval_minutes=None, interval_seconds=None, is_active=None):
     updates = {
         "name": name,
         "query": query,
@@ -135,6 +109,7 @@ def update_monitor(monitor_id, name=None, query=None, brand_id=None, min_price=N
         "interval_hours": interval_hours,
         "interval_minutes": interval_minutes,
         "interval_seconds": interval_seconds,
+        "is_active": is_active,
     }
 
     active_updates = {col: val for col, val in updates.items() if val is not None}
@@ -147,6 +122,13 @@ def update_monitor(monitor_id, name=None, query=None, brand_id=None, min_price=N
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(f"UPDATE monitors SET {', '.join(fields)} WHERE id = ?", (*values, monitor_id))
+    conn.commit()
+    conn.close()
+
+def set_monitor_active(monitor_id: int, is_active: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE monitors SET is_active = ? WHERE id = ?", (1 if is_active else 0, monitor_id))
     conn.commit()
     conn.close()
 
