@@ -158,3 +158,71 @@ def test_fastapi_endpoints():
     res_reset = client.post("/api/performance/reset")
     assert res_reset.status_code == 200
     assert "reset successfully" in res_reset.json()["message"]
+
+
+def test_polling_endpoint_filter():
+    import logging
+    from backend.main import PollingEndpointFilter
+
+    filt = PollingEndpointFilter()
+
+    # 1. Successful poll request - MUST be filtered (False)
+    rec_poll_overview = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:49287", "GET", "/api/overview?_=1791478266489", "1.1", 200),
+        exc_info=None,
+    )
+    assert filt.filter(rec_poll_overview) is False
+
+    # 2. Successful monitor progress poll - MUST be filtered (False)
+    rec_poll_progress = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:49291", "GET", "/api/monitor/6/progress?_=1791478267181", "1.1", 200),
+        exc_info=None,
+    )
+    assert filt.filter(rec_poll_progress) is False
+
+    # 3. Successful monitor top poll - MUST be filtered (False)
+    rec_poll_top = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:49291", "GET", "/api/monitor/6/top?_=1791478267181", "1.1", 200),
+        exc_info=None,
+    )
+    assert filt.filter(rec_poll_top) is False
+
+    # 4. Error response on poll endpoint - MUST NOT be filtered (True)
+    rec_poll_err = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:49291", "GET", "/api/monitor/6/progress", "1.1", 500),
+        exc_info=None,
+    )
+    assert filt.filter(rec_poll_err) is True
+
+    # 5. Non-polling request (e.g. creating monitor) - MUST NOT be filtered (True)
+    rec_create = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:49291", "POST", "/api/monitor", "1.1", 200),
+        exc_info=None,
+    )
+    assert filt.filter(rec_create) is True
+
