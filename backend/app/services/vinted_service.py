@@ -17,27 +17,53 @@ VINTED_CATALOG_URL = "https://api.vinted.it/svc-catalogue/items"
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
 DEFAULT_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+SESSION_TTL_SECONDS = 45 * 60  # Renew session every 45 minutes
 
 _session_local = threading.local()
 
-def get_vinted_session():
-    if not hasattr(_session_local, "session"):
-        session = requests.Session(impersonate="safari")
+def reset_vinted_session():
+    """Explicitly closes and discards the thread-local Vinted session."""
+    session = getattr(_session_local, "session", None)
+    if session is not None:
         try:
-            # Timeout esplicito (connect=5s, read=10s)
-            response = session.get(VINTED_BASE_URL, timeout=DEFAULT_TIMEOUT)
+            session.close()
+        except Exception:
+            pass
+    _session_local.session = None
+    _session_local.created_at = 0.0
+
+def get_vinted_session(force_refresh: bool = False):
+    session = getattr(_session_local, "session", None)
+    created_at = getattr(_session_local, "created_at", 0.0)
+    now = time.time()
+
+    is_expired = (now - created_at) > SESSION_TTL_SECONDS
+
+    if session is None or force_refresh or is_expired:
+        if is_expired and session is not None:
+            logger.info("Vinted session expired (age > %ds), renewing...", SESSION_TTL_SECONDS)
+        elif force_refresh and session is not None:
+            logger.info("Forcing refresh of Vinted session...")
+
+        reset_vinted_session()
+
+        new_session = requests.Session(impersonate="safari")
+        try:
+            response = new_session.get(VINTED_BASE_URL, timeout=DEFAULT_TIMEOUT)
             response.raise_for_status()
-            _session_local.session = session
-        except Timeout as exc:
-            logger.error("Timeout during Vinted session warm-up: %s", exc)
-            # Rilascia/chiudi la sessione ed evita di salvare uno stato corrotto
-            session.close()
+            _session_local.session = new_session
+            _session_local.created_at = time.time()
+        except (Timeout, RequestException) as exc:
+            logger.error("Network error during Vinted session warm-up: %s", exc)
+            new_session.close()
+            reset_vinted_session()
             raise
-        except RequestException as exc:
-            logger.error("Network error during session warm-up: %s", exc)
-            session.close()
+        except Exception as exc:
+            logger.error("Unexpected error during Vinted session warm-up: %s", exc)
+            new_session.close()
+            reset_vinted_session()
             raise
-            
+
     return _session_local.session
 
 def _get_api_headers(session):
@@ -159,7 +185,7 @@ def search_vinted(
     params["per_page"] = 48
 
     def _fetch_page(page_num):
-        nonlocal headers
+        nonlocal headers, session
         try:
             response = session.get(
                 VINTED_CATALOG_URL,
@@ -173,12 +199,13 @@ def search_vinted(
 
         if response.status_code in (401, 403):
             logger.warning(
-                f"⚠️ Received status {response.status_code} on page {page_num}, attempting cookie refresh"
+                f"⚠️ Received status {response.status_code} on page {page_num}, renewing session and cookies..."
             )
-            # Attempt to refresh session cookies once
+            # Recreate session from scratch
             try:
-                session.get(f"{VINTED_BASE_URL}/")
+                session = get_vinted_session(force_refresh=True)
                 headers = _get_api_headers(session)
+                time.sleep(random.uniform(1.5, 2.5))
                 response = session.get(
                     VINTED_CATALOG_URL,
                     headers=headers,
@@ -469,6 +496,17 @@ def check_item_status(url: str) -> ItemVerificationResult:
     except Exception as e:
         logger.error(f"Connection error verifying item status for {url}: {e}")
         return ItemVerificationResult(ItemStatus.ERROR)
+
+    if response.status_code in (401, 403):
+        logger.warning(f"Item {url} returned HTTP {response.status_code}, renewing session...")
+        try:
+            session = get_vinted_session(force_refresh=True)
+            time.sleep(random.uniform(1.0, 2.0))
+            response = session.get(url, timeout=30)
+        except Exception as e:
+            logger.error(f"Failed retry for item {url} after session refresh: {e}")
+            return ItemVerificationResult(ItemStatus.ERROR)
+
     if response.status_code == 404:
         logger.info(f"Item {url} returned 404, marked as REMOVED")
         return ItemVerificationResult(ItemStatus.REMOVED)
