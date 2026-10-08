@@ -7,7 +7,7 @@ from enum import Enum
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import Timeout, RequestException
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -146,7 +146,11 @@ def search_vinted(
     search_time_seconds: int = 5184000,
     progress_callback=None,
     order: str = "newest_first",
+    stop_event: Optional[threading.Event] = None,
 ):
+    if stop_event and stop_event.is_set():
+        return None
+
     session = get_vinted_session()
     effective_delay = max(page_delay_seconds or DEFAULT_PAGE_DELAY_SECONDS, MIN_PAGE_DELAY_SECONDS)
 
@@ -159,7 +163,15 @@ def search_vinted(
         return []
 
     # Realistic pause after establishing session before querying the catalogue
-    time.sleep(random.uniform(1.5, 2.8))
+    warmup_pause = random.uniform(1.5, 2.8)
+    if stop_event:
+        if stop_event.wait(timeout=warmup_pause):
+            return None
+    else:
+        time.sleep(warmup_pause)
+
+    if stop_event and stop_event.is_set():
+        return None
 
     headers = _get_api_headers(session)
 
@@ -186,6 +198,8 @@ def search_vinted(
 
     def _fetch_page(page_num):
         nonlocal headers, session
+        if stop_event and stop_event.is_set():
+            return None
         try:
             response = session.get(
                 VINTED_CATALOG_URL,
@@ -206,6 +220,8 @@ def search_vinted(
                 session = get_vinted_session(force_refresh=True)
                 headers = _get_api_headers(session)
                 time.sleep(random.uniform(1.5, 2.5))
+                if stop_event and stop_event.is_set():
+                    return None
                 response = session.get(
                     VINTED_CATALOG_URL,
                     headers=headers,
@@ -254,9 +270,21 @@ def search_vinted(
     logger.info(f"✅ Page 1/{pages_to_fetch}: {len(raw_items)} raw ({len(clean_items)} kept)")
 
     for page in range(2, pages_to_fetch + 1):
+        if stop_event and stop_event.is_set():
+            logger.info("Scrape aborted before page %d.", page)
+            return None
+
         delay = random.uniform(effective_delay * 0.85, effective_delay * 1.35)
         logger.info(f"⏳ Waiting {delay:.1f}s before page {page}...")
-        time.sleep(delay)
+        if stop_event:
+            if stop_event.wait(timeout=delay):
+                logger.info("Scrape aborted during delay before page %d.", page)
+                return None
+        else:
+            time.sleep(delay)
+
+        if stop_event and stop_event.is_set():
+            return None
 
         data = _fetch_page(page)
         if data is None:

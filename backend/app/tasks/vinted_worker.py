@@ -54,6 +54,7 @@ class VintedWorker:
 
         self._lock = threading.Lock()
         self._wake_up_event = threading.Event()
+        self._stop_event = threading.Event()
 
         # Min-heap queue: list of (nominal_next_run_ts, monitor_id)
         self._queue: list[tuple[float, int]] = []
@@ -70,6 +71,7 @@ class VintedWorker:
         if self.running:
             return
         self.running = True
+        self._stop_event.clear()
         self._load_monitors_from_db()
         self.thread = threading.Thread(target=self._run_loop, name="VintedWorker", daemon=True)
         self.thread.start()
@@ -77,9 +79,10 @@ class VintedWorker:
 
     def stop(self):
         self.running = False
+        self._stop_event.set()
         self._wake_up_event.set()
         if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=5)
+            self.thread.join(timeout=10)
         self.thread = None
         logger.info("VintedWorker stopped.")
 
@@ -177,7 +180,7 @@ class VintedWorker:
     # ── Worker Main Loop ──────────────────────────────────────────────────────
 
     def _run_loop(self):
-        while self.running:
+        while self.running and not self._stop_event.is_set():
             try:
                 now = time.time()
                 earliest = None
@@ -199,16 +202,12 @@ class VintedWorker:
                     effective_run_time = max(nominal_next_run, earliest_allowed)
 
                     if now >= effective_run_time:
-                        # Pop and execute
                         with self._lock:
-                            if self._queue and self._queue[0] == earliest:
-                                heapq.heappop(self._queue)
-                                self._current_running_monitor_id = monitor_id
-                            else:
-                                continue
+                            self._current_running_monitor_id = monitor_id
 
+                        success = False
                         try:
-                            self._execute_monitor_scrape(monitor_id)
+                            success = self._execute_monitor_scrape(monitor_id)
                         except Exception as e:
                             logger.exception("Error executing scrape for monitor %s: %s", monitor_id, e)
                         finally:
@@ -217,16 +216,30 @@ class VintedWorker:
                                 self._current_running_monitor_id = None
                                 self._progress.pop(monitor_id, None)
 
-                        # Re-schedule monitor for next run
-                        m = get_monitor(monitor_id)
-                        if m and m.get("is_active", 1):
-                            interval = _get_interval_seconds(m)
-                            new_next_run = self._last_scrape_finished_at + interval
-                            with self._lock:
+                        # Check if shutdown was requested during scrape
+                        if not self.running or self._stop_event.is_set():
+                            logger.info("Worker stopped during scrape; monitor %s remains in queue.", monitor_id)
+                            break
+
+                        if not success:
+                            logger.warning("Monitor %s scrape failed or aborted. Keeping in queue for retry.", monitor_id)
+                            continue
+
+                        # Only pop after successful completion!
+                        with self._lock:
+                            if self._queue and self._queue[0][1] == monitor_id:
+                                heapq.heappop(self._queue)
+                            else:
+                                self._queue = [(ts, mid) for ts, mid in self._queue if mid != monitor_id]
+                                heapq.heapify(self._queue)
+
+                            m = get_monitor(monitor_id)
+                            if m and m.get("is_active", 1):
+                                interval = _get_interval_seconds(m)
+                                new_next_run = self._last_scrape_finished_at + interval
                                 self._monitor_next_runs[monitor_id] = new_next_run
                                 heapq.heappush(self._queue, (new_next_run, monitor_id))
-                        else:
-                            with self._lock:
+                            else:
                                 self._monitor_next_runs.pop(monitor_id, None)
                         continue
                     else:
@@ -262,10 +275,13 @@ class VintedWorker:
 
     # ── Scrape Execution ──────────────────────────────────────────────────────
 
-    def _execute_monitor_scrape(self, monitor_id: int):
+    def _execute_monitor_scrape(self, monitor_id: int) -> bool:
+        if not self.running or self._stop_event.is_set():
+            return False
+
         m = get_monitor(monitor_id)
         if not m:
-            return
+            return False
 
         status_ids = json.loads(m["status_ids"]) if isinstance(m.get("status_ids"), str) else (m.get("status_ids") or [])
         max_pages = m.get("max_pages")
@@ -291,16 +307,24 @@ class VintedWorker:
             page_delay_seconds=page_delay_seconds,
             search_time_seconds=search_time_seconds,
             progress_callback=progress_cb,
+            stop_event=self._stop_event,
         )
+
+        if items is None or self._stop_event.is_set() or not self.running:
+            logger.info("Monitor %s scrape was aborted before completion.", m["name"])
+            return False
 
         new_count = save_listings(monitor_id, items, max_pages)
         update_monitor_last_scrape(monitor_id)
         logger.info("✅ Monitor %s completed: %d items scraped (%d new).", m["name"], len(items), new_count)
+        return True
 
     # ── Single Item Verification ──────────────────────────────────────────────
 
     def _verify_single_item(self) -> bool:
         """Verifies a single listing from verification_queue. Returns True if an item was checked."""
+        if not self.running or self._stop_event.is_set():
+            return False
         try:
             clear_queue()
             items = get_items_to_verify(max_items=1)
