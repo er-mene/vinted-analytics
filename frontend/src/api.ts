@@ -113,3 +113,15 @@ export async function clearVerificationQueue(): Promise<ClearQueueResponse> {
   }
   return res.json();
 }
+
+export async function fetchPerformance(): Promise<import("./types").PerformanceResponse> {
+  const res = await fetch(`${BASE}/performance?_=${Date.now()}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function resetPerformance(): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/performance/reset`, { method: "POST" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}

@@ -114,6 +114,49 @@
     .section-title {
       margin: 28px 0 12px; font-size: 1.3rem;
     }
+
+    /* performance panel */
+    .perf-box {
+      background: rgba(255,250,243,0.92);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 10px 30px rgba(31,41,55,0.05);
+      backdrop-filter: blur(6px);
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .perf-bar {
+      display: flex;
+      height: 18px;
+      border-radius: 999px;
+      overflow: hidden;
+      margin: 12px 0 16px;
+      background: #e5dccf;
+    }
+    .perf-seg {
+      height: 100%;
+      transition: width 0.3s ease;
+      min-width: 0;
+    }
+    .perf-seg-scrape { background: #0f766e; }
+    .perf-seg-sleep { background: #d97706; }
+    .perf-seg-write { background: #7c3aed; }
+    .perf-seg-read { background: #2563eb; }
+    .perf-seg-other { background: #9ca3af; }
+    .perf-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 0.85rem;
+      font-family: "Helvetica Neue", Arial, sans-serif;
+    }
+    .perf-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+    }
   </style>
 </head>
 <body>
@@ -122,9 +165,34 @@
       <span class="brand">Vinted Analytics</span>
       <a href="/api/dashboard" class="active">Dashboard</a>
       <a href="/api/queue/dashboard">Queue</a>
+      <a href="/api/performance/report" target="_blank" style="margin-left:auto;">Bottlenecks Report ↗</a>
     </nav>
 
     <section class="cards" id="summary-cards"></section>
+
+    <!-- Runtime Bottlenecks Section -->
+    <div class="perf-box" id="perf-panel">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
+        <div>
+          <span class="label" style="font-size:0.75rem;">Runtime Bottlenecks</span>
+          <div style="font-size:1.15rem; font-weight:700; margin-top:4px;" id="perf-bottleneck-title">Loading runtime metrics…</div>
+          <div style="font-size:0.85rem; color:var(--muted); font-family:'Helvetica Neue',sans-serif; margin-top:4px;" id="perf-insight"></div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <a href="/api/performance/report" target="_blank" style="font-family:'Helvetica Neue',sans-serif; font-size:0.85rem; color:var(--accent-2); text-decoration:none; font-weight:600;">Text Report ↗</a>
+          <button id="reset-perf-btn" style="background:#fff; border:1px solid var(--line); border-radius:8px; padding:6px 12px; font-size:0.8rem; cursor:pointer; font-family:'Helvetica Neue',sans-serif; font-weight:600; color:var(--ink);">Reset Metrics</button>
+        </div>
+      </div>
+      <div class="perf-bar" id="perf-bar">
+        <div class="perf-seg perf-seg-sleep" id="seg-sleep" style="width: 0%" title="time.sleep()"></div>
+        <div class="perf-seg perf-seg-scrape" id="seg-scrape" style="width: 0%" title="Web Scraping"></div>
+        <div class="perf-seg perf-seg-write" id="seg-write" style="width: 0%" title="DB Write"></div>
+        <div class="perf-seg perf-seg-read" id="seg-read" style="width: 0%" title="DB Read"></div>
+        <div class="perf-seg perf-seg-other" id="seg-other" style="width: 0%" title="Other / CPU"></div>
+      </div>
+      <div class="perf-legend" id="perf-legend"></div>
+      <div id="perf-last-scrape" style="margin-top:14px; font-size:0.85rem; color:var(--muted); font-family:'Helvetica Neue',sans-serif; border-top:1px solid var(--line); padding-top:10px;"></div>
+    </div>
 
     <h2 class="section-title">Monitors</h2>
     <div class="table-wrap">
@@ -146,51 +214,122 @@
   </div>
   <script>
     (async () => {
-      const resp = await fetch("/api/overview?_=" + Date.now());
-      if (!resp.ok) { document.body.innerHTML = '<div class="shell"><p class="empty">Failed to load data.</p></div>'; return; }
-      const data = await resp.json();
+      // 1. Load Overview Data (Monitors & Queue)
+      try {
+        const resp = await fetch("/api/overview?_=" + Date.now());
+        if (resp.ok) {
+          const data = await resp.json();
 
-      // summary cards
-      const totalMon = data.monitors.length;
-      const totalList = data.monitors.reduce((s, m) => s + (m.active_listings || 0), 0);
-      document.getElementById("summary-cards").innerHTML = [
-        ["Monitors", totalMon],
-        ["Active Listings", totalList],
-        ["Queue Size", data.queue.total],
-        ["Oldest Queued", data.queue.oldest_queued ? data.queue.oldest_queued.slice(0, 10) : "—"]
-      ].map(([label, value]) =>
-        `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`
-      ).join("");
+          // summary cards
+          const totalMon = data.monitors.length;
+          const totalList = data.monitors.reduce((s, m) => s + (m.active_listings || 0), 0);
+          document.getElementById("summary-cards").innerHTML = [
+            ["Monitors", totalMon],
+            ["Active Listings", totalList],
+            ["Queue Size", data.queue.total],
+            ["Oldest Queued", data.queue.oldest_queued ? data.queue.oldest_queued.slice(0, 10) : "—"]
+          ].map(([label, value]) =>
+            `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`
+          ).join("");
 
-      // monitors table
-      const tbody = document.getElementById("monitors-body");
-      if (!data.monitors.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="empty">No monitors yet.</td></tr>';
-        return;
+          // monitors table
+          const tbody = document.getElementById("monitors-body");
+          if (!data.monitors.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="empty">No monitors yet.</td></tr>';
+          } else {
+            tbody.innerHTML = "";
+            for (const m of data.monitors) {
+              const status = m.paused
+                ? '<span class="badge badge-yellow">Paused</span>'
+                : m.next_run_time
+                  ? '<span class="badge badge-green">Active</span>'
+                  : '<span class="badge badge-gray">Stopped</span>';
+              const nextRun = m.next_run_time ? m.next_run_time.slice(0, 19).replace("T", " ") : "—";
+              const lastScrape = m.last_scrape ? m.last_scrape.slice(0, 19).replace("T", " ") : "—";
+              const avgP = m.avg_price !== null ? "\u20AC" + Number(m.avg_price).toFixed(2) : "—";
+              const row = document.createElement("tr");
+              row.innerHTML =
+                `<td><strong>${m.name}</strong></td>` +
+                `<td>${m.query}</td>` +
+                `<td>${status}<br><span style="font-size:0.8rem;color:var(--muted)">${nextRun}</span></td>` +
+                `<td><span style="font-size:0.85rem;color:var(--muted)">${lastScrape}</span></td>` +
+                `<td>${m.active_listings ?? 0} active / ${m.sold_listings ?? 0} sold</td>` +
+                `<td>${avgP}</td>` +
+                `<td class="actions">
+                  <a href="/api/monitor/${m.id}/run">Run</a>
+                  <a href="/api/monitor/${m.id}/analytics">Data</a>
+                  <a href="/api/monitor/${m.id}/dashboard">Chart</a>
+                </td>`;
+              tbody.appendChild(row);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load overview data", err);
       }
-      for (const m of data.monitors) {
-        const status = m.paused
-          ? '<span class="badge badge-yellow">Paused</span>'
-          : m.next_run_time
-            ? '<span class="badge badge-green">Active</span>'
-            : '<span class="badge badge-gray">Stopped</span>';
-        const nextRun = m.next_run_time ? m.next_run_time.slice(0, 19).replace("T", " ") : "—";
-        const lastScrape = m.last_scrape ? m.last_scrape.slice(0, 19).replace("T", " ") : "—";
-        const avgP = m.avg_price !== null ? "\u20AC" + Number(m.avg_price).toFixed(2) : "—";
-        const row = document.createElement("tr");
-        row.innerHTML =
-          `<td><strong>${m.name}</strong></td>` +
-          `<td>${m.query}</td>` +
-          `<td>${status}<br><span style="font-size:0.8rem;color:var(--muted)">${nextRun}</span></td>` +
-          `<td><span style="font-size:0.85rem;color:var(--muted)">${lastScrape}</span></td>` +
-          `<td>${m.active_listings ?? 0} active / ${m.sold_listings ?? 0} sold</td>` +
-          `<td>${avgP}</td>` +
-          `<td class="actions">
-            <a href="/api/monitor/${m.id}/run">Run</a>
-            <a href="/api/monitor/${m.id}/analytics">Data</a>
-            <a href="/api/monitor/${m.id}/dashboard">Chart</a>
-          </td>`;
-        tbody.appendChild(row);
+
+      // 2. Load & Render Performance Metrics
+      async function renderPerformance() {
+        try {
+          const pResp = await fetch("/api/performance?_=" + Date.now());
+          if (!pResp.ok) return;
+          const perf = await pResp.json();
+          const s = perf.summary;
+
+          const pTitle = document.getElementById("perf-bottleneck-title");
+          const pInsight = document.getElementById("perf-insight");
+          const bName = perf.primary_bottleneck.replace("_", " ").toUpperCase();
+          pTitle.innerHTML = `Primary Bottleneck: <span style="color:var(--accent);">${bName}</span> (${perf.primary_bottleneck_pct}% of runtime)`;
+          if (perf.insights && perf.insights.length > 0) {
+            pInsight.textContent = perf.insights[0];
+          }
+
+          // Segments
+          document.getElementById("seg-sleep").style.width = (s.time_sleep.percentage || 0) + "%";
+          document.getElementById("seg-scrape").style.width = (s.web_scraping.percentage || 0) + "%";
+          document.getElementById("seg-write").style.width = (s.db_write.percentage || 0) + "%";
+          document.getElementById("seg-read").style.width = (s.db_read.percentage || 0) + "%";
+          document.getElementById("seg-other").style.width = (s.other.percentage || 0) + "%";
+
+          // Legend
+          document.getElementById("perf-legend").innerHTML = [
+            ["#d97706", "time.sleep() / delays", s.time_sleep],
+            ["#0f766e", "Web Scraping", s.web_scraping],
+            ["#7c3aed", "DB Write", s.db_write],
+            ["#2563eb", "DB Read", s.db_read],
+            ["#9ca3af", "Other / CPU", s.other],
+          ].map(([color, label, stat]) => `
+            <div>
+              <span class="perf-dot" style="background:${color}"></span>
+              <strong>${label}:</strong> ${stat.total_seconds}s (${stat.percentage}%) <span style="color:var(--muted)">[${stat.count} calls, avg: ${stat.avg_ms}ms]</span>
+            </div>
+          `).join("");
+
+          // Last scrape
+          const lastEl = document.getElementById("perf-last-scrape");
+          if (perf.last_scrape) {
+            const ls = perf.last_scrape;
+            lastEl.innerHTML = `<strong>Last Completed Scrape:</strong> Monitor #${ls.monitor_id} (${ls.monitor_name}) finished in <strong>${ls.duration_seconds}s</strong> (items: ${ls.items_found}, new: ${ls.new_items}) | ` +
+              `Sleep: ${ls.breakdown_percentages.time_sleep || 0}% | Web: ${ls.breakdown_percentages.web_scraping || 0}% | DB Write: ${ls.breakdown_percentages.db_write || 0}% | DB Read: ${ls.breakdown_percentages.db_read || 0}%`;
+          } else {
+            lastEl.innerHTML = `<em>No completed monitor scrape runs recorded yet in current session.</em>`;
+          }
+        } catch (err) {
+          console.error("Failed to load perf stats", err);
+        }
+      }
+
+      await renderPerformance();
+
+      // Reset button
+      const resetBtn = document.getElementById("reset-perf-btn");
+      if (resetBtn) {
+        resetBtn.addEventListener("click", async () => {
+          if (confirm("Reset all performance counters?")) {
+            await fetch("/api/performance/reset", { method: "POST" });
+            renderPerformance();
+          }
+        });
       }
     })();
   </script>

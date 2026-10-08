@@ -12,6 +12,11 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+try:
+    from app.utils.perf_monitor import perf_monitor
+except ImportError:
+    from backend.app.utils.perf_monitor import perf_monitor
+
 VINTED_BASE_URL = "https://www.vinted.it"
 VINTED_CATALOG_URL = "https://api.vinted.it/svc-catalogue/items"
 CONNECT_TIMEOUT = 5.0
@@ -49,7 +54,8 @@ def get_vinted_session(force_refresh: bool = False):
 
         new_session = requests.Session(impersonate="safari")
         try:
-            response = new_session.get(VINTED_BASE_URL, timeout=DEFAULT_TIMEOUT)
+            with perf_monitor.track("web_scraping", "session_warmup_get"):
+                response = new_session.get(VINTED_BASE_URL, timeout=DEFAULT_TIMEOUT)
             response.raise_for_status()
             _session_local.session = new_session
             _session_local.created_at = time.time()
@@ -157,7 +163,8 @@ def search_vinted(
     logger.info(f"🕵️  Scraping Vinted for: {query} (page delay: ~{effective_delay:.1f}s)...")
 
     try:
-        session.get(f"{VINTED_BASE_URL}/")
+        with perf_monitor.track("web_scraping", "cookie_warmup_get"):
+            session.get(f"{VINTED_BASE_URL}/")
     except Exception as e:
         logger.error(f"❌ Connection Error (Cookies): {e}")
         return []
@@ -165,10 +172,10 @@ def search_vinted(
     # Realistic pause after establishing session before querying the catalogue
     warmup_pause = random.uniform(1.5, 2.8)
     if stop_event:
-        if stop_event.wait(timeout=warmup_pause):
+        if perf_monitor.event_wait(stop_event, timeout=warmup_pause, name="warmup_pause", category="time_sleep"):
             return None
     else:
-        time.sleep(warmup_pause)
+        perf_monitor.sleep(warmup_pause, name="warmup_pause", category="time_sleep")
 
     if stop_event and stop_event.is_set():
         return None
@@ -201,12 +208,13 @@ def search_vinted(
         if stop_event and stop_event.is_set():
             return None
         try:
-            response = session.get(
-                VINTED_CATALOG_URL,
-                headers=headers,
-                params={**params, "page": page_num},
-                timeout=30,
-            )
+            with perf_monitor.track("web_scraping", "catalog_page_get"):
+                response = session.get(
+                    VINTED_CATALOG_URL,
+                    headers=headers,
+                    params={**params, "page": page_num},
+                    timeout=30,
+                )
         except Exception as e:
             logger.error(f"❌ Connection Error (API page {page_num}): {e}")
             return None
@@ -219,15 +227,16 @@ def search_vinted(
             try:
                 session = get_vinted_session(force_refresh=True)
                 headers = _get_api_headers(session)
-                time.sleep(random.uniform(1.5, 2.5))
+                perf_monitor.sleep(random.uniform(1.5, 2.5), name="auth_retry_delay", category="time_sleep")
                 if stop_event and stop_event.is_set():
                     return None
-                response = session.get(
-                    VINTED_CATALOG_URL,
-                    headers=headers,
-                    params={**params, "page": page_num},
-                    timeout=30,
-                )
+                with perf_monitor.track("web_scraping", "catalog_page_retry_get"):
+                    response = session.get(
+                        VINTED_CATALOG_URL,
+                        headers=headers,
+                        params={**params, "page": page_num},
+                        timeout=30,
+                    )
             except Exception as e:
                 logger.warning(f"Failed session refresh on page {page_num}: {e}")
 
@@ -277,11 +286,11 @@ def search_vinted(
         delay = random.uniform(effective_delay * 0.85, effective_delay * 1.35)
         logger.info(f"⏳ Waiting {delay:.1f}s before page {page}...")
         if stop_event:
-            if stop_event.wait(timeout=delay):
+            if perf_monitor.event_wait(stop_event, timeout=delay, name="page_delay", category="time_sleep"):
                 logger.info("Scrape aborted during delay before page %d.", page)
                 return None
         else:
-            time.sleep(delay)
+            perf_monitor.sleep(delay, name="page_delay", category="time_sleep")
 
         if stop_event and stop_event.is_set():
             return None
@@ -520,7 +529,8 @@ def check_item_status(url: str) -> ItemVerificationResult:
     session = get_vinted_session()
 
     try:
-        response = session.get(url, timeout=30)
+        with perf_monitor.track("web_scraping", "item_verification_get"):
+            response = session.get(url, timeout=30)
     except Exception as e:
         logger.error(f"Connection error verifying item status for {url}: {e}")
         return ItemVerificationResult(ItemStatus.ERROR)
@@ -529,8 +539,9 @@ def check_item_status(url: str) -> ItemVerificationResult:
         logger.warning(f"Item {url} returned HTTP {response.status_code}, renewing session...")
         try:
             session = get_vinted_session(force_refresh=True)
-            time.sleep(random.uniform(1.0, 2.0))
-            response = session.get(url, timeout=30)
+            perf_monitor.sleep(random.uniform(1.0, 2.0), name="verification_retry_delay", category="time_sleep")
+            with perf_monitor.track("web_scraping", "item_verification_retry_get"):
+                response = session.get(url, timeout=30)
         except Exception as e:
             logger.error(f"Failed retry for item {url} after session refresh: {e}")
             return ItemVerificationResult(ItemStatus.ERROR)

@@ -7,8 +7,16 @@ from datetime import datetime
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_NAME = os.path.join(BACKEND_DIR, "vinted_data.db")
 
+try:
+    from app.utils.perf_monitor import trace_connection
+except ImportError:
+    from backend.app.utils.perf_monitor import trace_connection
+
+def get_db_connection(db_path: str | None = None):
+    return trace_connection(sqlite3.connect(db_path or DB_NAME))
+
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     
@@ -28,6 +36,7 @@ def init_db():
             has_been_promoted INTEGER, -- boolean
             scrape_position INTEGER,
             last_seen_at TIMESTAMP,
+            consecutive_misses INTEGER DEFAULT 0,
             PRIMARY KEY (id, monitor_id)
         )
     ''')
@@ -64,6 +73,11 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    try:
+        cursor.execute("ALTER TABLE listings ADD COLUMN consecutive_misses INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS verification_queue (
             id INTEGER PRIMARY KEY REFERENCES listings(id) ON DELETE CASCADE,
@@ -86,7 +100,7 @@ def init_db():
 
 
 def create_monitor(name, query, brand_id, min_price, max_price, status_ids=[], max_pages=None, page_delay_seconds=6.0, search_time_seconds=5184000, max_age=7.0, interval_days=0, interval_hours=0, interval_minutes=30, interval_seconds=0, is_active=1):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     status_str = json.dumps(status_ids) if status_ids else "[]"
@@ -127,21 +141,21 @@ def update_monitor(monitor_id, name=None, query=None, brand_id=None, min_price=N
     fields = [f"{col} = ?" for col in active_updates]
     values = list(active_updates.values())
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(f"UPDATE monitors SET {', '.join(fields)} WHERE id = ?", (*values, monitor_id))
     conn.commit()
     conn.close()
 
 def set_monitor_active(monitor_id: int, is_active: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE monitors SET is_active = ? WHERE id = ?", (1 if is_active else 0, monitor_id))
     conn.commit()
     conn.close()
 
 def get_monitor(monitor_id):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row # Allows accessing columns by name
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM monitors WHERE id = ?", (monitor_id,))
@@ -150,7 +164,7 @@ def get_monitor(monitor_id):
     return dict(row) if row else None
 
 def get_monitors_list():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM monitors")
@@ -159,22 +173,30 @@ def get_monitors_list():
     return [dict(r) for r in rows]
 
 def get_active_positions_for_monitor(monitor_id: int) -> dict[int, dict]:
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT id, scrape_position, price, last_seen_at
+        SELECT id, scrape_position, price, last_seen_at, has_been_promoted, consecutive_misses
         FROM listings
         WHERE monitor_id = ? AND is_active = 1
     """, (monitor_id,))
     rows = cursor.fetchall()
     conn.close()
     return {
-        row[0]: {"position": row[1], "price": row[2], "last_seen_at": row[3]}
+        row[0]: {
+            "position": row[1],
+            "price": row[2],
+            "last_seen_at": row[3],
+            "has_been_promoted": row[4] or 0,
+            "consecutive_misses": row[5] or 0,
+        }
         for row in rows
     }
 
 
-# How many days without being seen before an item past the pivot gets enqueued
+# Configuration for absence confirmation and queueing
+MISS_CONFIRMATION_THRESHOLD = 2
+MISS_HOURS_THRESHOLD = 3.0
 QUEUE_ZOMBIE_THRESHOLD_DAYS = 2
 
 
@@ -192,11 +214,82 @@ def _is_item_older_than(item: dict, now_ts: float, max_age_seconds: float) -> bo
     return False
 
 
+def _calculate_scrape_pivot(
+    items: list,
+    prev_data: dict[int, dict],
+    max_pages: int | None = None
+) -> int:
+    """
+    Computes the depth watermark (pivot) in previous scrape positions.
+    Only organic (non-promoted) listings with unchanged prices and consistent
+    downward/monotonic shifts are used as anchors to prevent promoted items
+    or outliers from corrupting the watermark.
+    """
+    if not items or not prev_data:
+        return -1
+
+    curr_item_count = len(items)
+    anchors = []
+
+    for curr_pos, item in enumerate(items):
+        item_id = item["id"]
+        if item_id not in prev_data:
+            continue
+
+        prev_info = prev_data[item_id]
+        # Ignore promoted items in either previous or current scrape
+        if item.get("has_been_promoted") or prev_info.get("has_been_promoted"):
+            continue
+
+        # Ignore items whose price changed (could be bumped/re-ranked)
+        if prev_info["price"] != item["price"]:
+            continue
+
+        old_pos = prev_info.get("position")
+        if old_pos is None:
+            continue
+
+        # Plausibility check: in newest-first feeds, older items shift down (curr_pos >= old_pos).
+        # We allow a small upward drift (up to 15 positions) for deletions ahead of it,
+        # but an item jumping dozens of positions toward the top is an outlier (relisted/bumped).
+        # Also, old_pos cannot be substantially deeper than the total scrape depth.
+        if curr_pos < old_pos - 15:
+            continue
+        if old_pos > curr_item_count + 15:
+            continue
+
+        anchors.append(old_pos)
+
+    if not anchors:
+        # Fallback: check all non-promoted common items with plausible positions
+        for curr_pos, item in enumerate(items):
+            item_id = item["id"]
+            if item_id in prev_data:
+                prev_info = prev_data[item_id]
+                if item.get("has_been_promoted") or prev_info.get("has_been_promoted"):
+                    continue
+                old_pos = prev_info.get("position")
+                if old_pos is not None and curr_pos >= old_pos - 15 and old_pos <= curr_item_count + 15:
+                    anchors.append(old_pos)
+
+    if not anchors:
+        return -1
+
+    pivot = max(anchors)
+
+    # Scrape depth protection: cap pivot to the items actually fetched (+ buffer for deletions)
+    max_allowed_pivot = curr_item_count + 15
+    if pivot > max_allowed_pivot:
+        pivot = max_allowed_pivot
+
+    return pivot
+
+
 def save_listings(monitor_id: int, items: list, max_pages: int | None = None) -> int:
     if not items:
         return 0
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute("SELECT max_age FROM monitors WHERE id = ?", (monitor_id,))
@@ -213,42 +306,23 @@ def save_listings(monitor_id: int, items: list, max_pages: int | None = None) ->
         return 0
 
     prev_data = get_active_positions_for_monitor(monitor_id)
-
     new_ids_set = {item["id"] for item in items}
     new_count = 0
 
-    # Find pivot: among items present in both scrapes with same price,
-    # the one with the highest old position
-    pivot = -1
-    for position, item in enumerate(items):
-        item_id = item["id"]
-        if item_id in prev_data and prev_data[item_id]["price"] == item["price"]:
-            old_pos = prev_data[item_id]["position"]
-            if old_pos is not None and old_pos > pivot:
-                pivot = old_pos
+    # Clean up verification_queue for any listings that reappeared in the current scrape (false positives)
+    if new_ids_set:
+        ph = ", ".join(["?"] * len(new_ids_set))
+        cursor.execute(f"DELETE FROM verification_queue WHERE id IN ({ph})", list(new_ids_set))
 
-    # Fallback: no unmodified item → use any common item
-    if pivot == -1:
-        for position, item in enumerate(items):
-            item_id = item["id"]
-            if item_id in prev_data:
-                old_pos = prev_data[item_id]["position"]
-                if old_pos is not None and old_pos > pivot:
-                    pivot = old_pos
+    # Calculate depth watermark (pivot) using organic, non-promoted anchor items
+    pivot = _calculate_scrape_pivot(items, prev_data, max_pages)
 
-    # Scrape depth protection: if we fetched far fewer items than expected,
-    # cap pivot to avoid enqueuing items that simply weren't scraped
-    if max_pages and pivot >= 0:
-        expected = max_pages * 48
-        if len(items) < expected * 0.5:
-            pivot = min(pivot, len(items) - 1)
-
-    # Save listings with their scrape position
+    # Save listings with their scrape position and reset consecutive_misses to 0
     for position, item in enumerate(items):
         cursor.execute("""
             INSERT INTO listings
-            (id, monitor_id, title, brand, price, url, status_id, is_active, likes, listed_at, has_been_promoted, scrape_position, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            (id, monitor_id, title, brand, price, url, status_id, is_active, likes, listed_at, has_been_promoted, scrape_position, last_seen_at, consecutive_misses)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 0)
             ON CONFLICT(id, monitor_id) DO UPDATE SET
             price = excluded.price,
             likes = excluded.likes,
@@ -256,33 +330,49 @@ def save_listings(monitor_id: int, items: list, max_pages: int | None = None) ->
             scrape_position = excluded.scrape_position,
             is_active = excluded.is_active,
             sold_at = NULL,
-            last_seen_at = CURRENT_TIMESTAMP
+            last_seen_at = CURRENT_TIMESTAMP,
+            consecutive_misses = 0
         """, (
             item["id"], monitor_id, item["title"], item["brand"], item["price"],
             item["url"], item.get("status_id"), 1, item.get("likes"),
-            item.get("listed_at"), item.get("has_been_promoted"), position,
+            item.get("listed_at"), item.get("has_been_promoted", 0), position,
         ))
         if cursor.rowcount > 0:
             new_count += 1
 
-    # Collect absent items by category
     immediate = []
     deferred = []
 
     for prev_id, info in prev_data.items():
         if prev_id in new_ids_set:
             continue
+
         p = info["position"]
-        if p is None:
-            immediate.append(prev_id)
-        elif pivot < 0:
-            immediate.append(prev_id)
-        elif p <= pivot:
-            immediate.append(prev_id)
+        last_seen_at = info.get("last_seen_at")
+        misses = info.get("consecutive_misses", 0) + 1
+
+        cursor.execute(
+            "UPDATE listings SET consecutive_misses = ? WHERE id = ? AND monitor_id = ?",
+            (misses, prev_id, monitor_id)
+        )
+
+        if pivot >= 0 and p is not None and p <= pivot:
+            is_confirmed = (misses >= MISS_CONFIRMATION_THRESHOLD)
+            if not is_confirmed and last_seen_at:
+                try:
+                    dt = datetime.strptime(last_seen_at, "%Y-%m-%d %H:%M:%S")
+                    hours_absent = (datetime.now() - dt).total_seconds() / 3600.0
+                    if hours_absent >= MISS_HOURS_THRESHOLD:
+                        is_confirmed = True
+                except Exception:
+                    pass
+
+            if is_confirmed:
+                immediate.append(prev_id)
         else:
             deferred.append(prev_id)
 
-    # Enqueue immediate items (within pivot / null position / all when pivot < 0)
+    # Enqueue immediate items (within pivot, confirmed absent)
     if immediate:
         ph = ", ".join(["?"] * len(immediate))
         cursor.execute(f"""
@@ -290,11 +380,10 @@ def save_listings(monitor_id: int, items: list, max_pages: int | None = None) ->
             SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             FROM listings
             WHERE id IN ({ph})
-            ON CONFLICT(id) DO UPDATE SET
-            last_check = CURRENT_TIMESTAMP
+            ON CONFLICT(id) DO NOTHING
         """, immediate)
 
-    # Enqueue deferred items (past pivot) only if absent for threshold days
+    # Enqueue deferred items (past pivot or unanchored) only if absent for threshold days
     if deferred:
         ph = ", ".join(["?"] * len(deferred))
         cursor.execute(f"""
@@ -302,9 +391,8 @@ def save_listings(monitor_id: int, items: list, max_pages: int | None = None) ->
             SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             FROM listings
             WHERE id IN ({ph})
-            AND julianday('now') - julianday(last_seen_at) >= ?
-            ON CONFLICT(id) DO UPDATE SET
-            last_check = CURRENT_TIMESTAMP
+            AND (julianday('now') - julianday(last_seen_at)) >= ?
+            ON CONFLICT(id) DO NOTHING
         """, deferred + [QUEUE_ZOMBIE_THRESHOLD_DAYS])
 
     conn.commit()
@@ -314,17 +402,18 @@ def save_listings(monitor_id: int, items: list, max_pages: int | None = None) ->
 QUEUE_EXPIRATION = 7.0
 
 def clear_queue(max_age: float | None = None):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        DELETE FROM listings
+        DELETE FROM verification_queue
         WHERE id IN (
-            SELECT id
-            FROM verification_queue
-        )
-        AND julianday('now') - julianday(listed_at) >= COALESCE(
-            (SELECT max_age FROM monitors WHERE id = listings.monitor_id),
-            ?
+            SELECT vq.id
+            FROM verification_queue vq
+            JOIN listings l ON l.id = vq.id
+            WHERE (julianday('now') - julianday(l.listed_at)) >= COALESCE(
+                (SELECT max_age FROM monitors WHERE id = l.monitor_id),
+                ?
+            )
         )
     ''', (max_age or QUEUE_EXPIRATION,))
     cursor.execute('''
@@ -338,7 +427,7 @@ def clear_queue(max_age: float | None = None):
     conn.close()
 
 def clear_verification_queue() -> int:
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM verification_queue")
     count = cursor.rowcount
@@ -347,7 +436,7 @@ def clear_verification_queue() -> int:
     return count
 
 def clear_data(monitors: bool = False, listings: bool = True, daily_stats: bool = True):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     if monitors:
         cursor.execute('''DELETE FROM monitors''')
@@ -363,7 +452,7 @@ def clear_data(monitors: bool = False, listings: bool = True, daily_stats: bool 
     conn.close()
 
 def delete_monitor(monitor_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.execute('''PRAGMA foreign_keys = ON;''')
     cursor = conn.cursor()
     cursor.execute('''DELETE FROM monitors WHERE id = ?''', (monitor_id,))
@@ -371,7 +460,7 @@ def delete_monitor(monitor_id: int):
     conn.close()
 
 def get_items_to_verify(max_items: int | None = None):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     query = '''
@@ -401,7 +490,7 @@ def get_items_to_verify(max_items: int | None = None):
     return items
 
 def mark_item_as_sold(item_id: int, listed_at: str | None = None):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         DELETE FROM verification_queue
@@ -428,7 +517,7 @@ def mark_item_as_sold(item_id: int, listed_at: str | None = None):
 def update_listing_listed_at(item_id: int, listed_at: str):
     if not listed_at:
         return
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         UPDATE listings
@@ -439,7 +528,7 @@ def update_listing_listed_at(item_id: int, listed_at: str):
     conn.close()
 
 def delete_listing(item_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         DELETE FROM verification_queue
@@ -453,21 +542,21 @@ def delete_listing(item_id: int):
     conn.close()
 
 def delete_from_queue(item_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM verification_queue WHERE id = ?", (item_id,))
     conn.commit()
     conn.close()
 
 def update_monitor_last_scrape(monitor_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE monitors SET last_scrape = CURRENT_TIMESTAMP WHERE id = ?", (monitor_id,))
     conn.commit()
     conn.close()
 
 def get_recent_items(monitor_id: int, limit: int = 10):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("""
@@ -486,7 +575,7 @@ def get_listings(monitor_id: int, sort_by: str = "likes", order: str = "DESC", l
     if sort_by not in allowed_sort:
         sort_by = "likes"
     order = "ASC" if order.upper() == "ASC" else "DESC"
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute(f"""
@@ -501,7 +590,7 @@ def get_listings(monitor_id: int, sort_by: str = "likes", order: str = "DESC", l
     return rows
 
 def get_monitor_analytics(monitor_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -565,7 +654,7 @@ def get_monitor_analytics(monitor_id: int):
 
 
 def get_monitors_with_stats():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("""
@@ -588,7 +677,7 @@ def get_monitors_with_stats():
 
 
 def get_verification_queue_summary():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) AS total, MIN(queued_at) AS oldest_queued FROM verification_queue")
     row = cursor.fetchone()
@@ -597,7 +686,7 @@ def get_verification_queue_summary():
 
 
 def get_verification_queue_items(limit: int | None = None):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     query = """

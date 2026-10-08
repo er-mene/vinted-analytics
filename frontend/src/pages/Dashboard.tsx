@@ -5,6 +5,7 @@ import { fmtDate } from "../utils";
 import SummaryCards from "../components/SummaryCards";
 import MonitorCard from "../components/MonitorCard";
 import CreateMonitorModal from "../components/CreateMonitorModal";
+import BottleneckMonitorCard from "../components/BottleneckMonitorCard";
 import type { Monitor } from "../types";
 
 export default function Dashboard() {
@@ -66,6 +67,8 @@ export default function Dashboard() {
           },
         ]}
       />
+
+      <BottleneckMonitorCard />
 
       {data.monitors.length === 0 ? (
         <p className="font-sans text-muted text-center py-16">

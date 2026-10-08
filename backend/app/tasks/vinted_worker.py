@@ -21,6 +21,11 @@ from app.db.database import (
 )
 from app.services.vinted_service import search_vinted, check_item_status, ItemStatus
 
+try:
+    from app.utils.perf_monitor import perf_monitor
+except ImportError:
+    from backend.app.utils.perf_monitor import perf_monitor
+
 logger = logging.getLogger(__name__)
 
 
@@ -251,27 +256,27 @@ class VintedWorker:
                             if verified:
                                 pause = min(wait_seconds - 3.0, random.uniform(8.0, 12.0))
                                 if pause > 0:
-                                    self._wake_up_event.wait(timeout=pause)
+                                    perf_monitor.event_wait(self._wake_up_event, timeout=pause, name="verification_pause", category="time_sleep")
                                     self._wake_up_event.clear()
                                 continue
 
                         # Wait until effective_run_time (interruptible)
-                        self._wake_up_event.wait(timeout=wait_seconds)
+                        perf_monitor.event_wait(self._wake_up_event, timeout=wait_seconds, name="worker_cooldown", category="time_sleep")
                         self._wake_up_event.clear()
                 else:
                     # No active monitors in queue: work on verification queue
                     verified = self._verify_single_item()
                     if verified:
-                        self._wake_up_event.wait(timeout=random.uniform(10.0, 15.0))
+                        perf_monitor.event_wait(self._wake_up_event, timeout=random.uniform(10.0, 15.0), name="idle_verification_pause", category="time_sleep")
                         self._wake_up_event.clear()
                     else:
                         # Idle: sleep until notified or 30s timeout
-                        self._wake_up_event.wait(timeout=30.0)
+                        perf_monitor.event_wait(self._wake_up_event, timeout=30.0, name="worker_idle_wait", category="time_sleep")
                         self._wake_up_event.clear()
 
             except Exception:
                 logger.exception("Unexpected error in VintedWorker loop.")
-                time.sleep(5)
+                perf_monitor.sleep(5, name="worker_error_backoff", category="time_sleep")
 
     # ── Scrape Execution ──────────────────────────────────────────────────────
 
@@ -297,27 +302,29 @@ class VintedWorker:
 
         progress_cb(0, 1)
 
-        items = search_vinted(
-            query=m["query"],
-            brand_id=m["brand_id"],
-            min_price=m["min_price"],
-            max_price=m["max_price"],
-            status_ids=status_ids,
-            max_pages=max_pages,
-            page_delay_seconds=page_delay_seconds,
-            search_time_seconds=search_time_seconds,
-            progress_callback=progress_cb,
-            stop_event=self._stop_event,
-        )
+        with perf_monitor.track_scrape(monitor_id, m["name"]) as scrape_ctx:
+            items = search_vinted(
+                query=m["query"],
+                brand_id=m["brand_id"],
+                min_price=m["min_price"],
+                max_price=m["max_price"],
+                status_ids=status_ids,
+                max_pages=max_pages,
+                page_delay_seconds=page_delay_seconds,
+                search_time_seconds=search_time_seconds,
+                progress_callback=progress_cb,
+                stop_event=self._stop_event,
+            )
 
-        if items is None or self._stop_event.is_set() or not self.running:
-            logger.info("Monitor %s scrape was aborted before completion.", m["name"])
-            return False
+            if items is None or self._stop_event.is_set() or not self.running:
+                logger.info("Monitor %s scrape was aborted before completion.", m["name"])
+                return False
 
-        new_count = save_listings(monitor_id, items, max_pages)
-        update_monitor_last_scrape(monitor_id)
-        logger.info("✅ Monitor %s completed: %d items scraped (%d new).", m["name"], len(items), new_count)
-        return True
+            new_count = save_listings(monitor_id, items, max_pages)
+            update_monitor_last_scrape(monitor_id)
+            scrape_ctx.set_results(pages=max_pages or 1, items=len(items), new_items=new_count)
+            logger.info("✅ Monitor %s completed: %d items scraped (%d new).", m["name"], len(items), new_count)
+            return True
 
     # ── Single Item Verification ──────────────────────────────────────────────
 

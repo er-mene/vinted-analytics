@@ -26,6 +26,11 @@ from app.db.database import (
 from app.services.vinted_service import search_vinted
 from app.tasks.vinted_worker import vinted_worker
 
+try:
+    from app.utils.perf_monitor import perf_monitor
+except ImportError:
+    from backend.app.utils.perf_monitor import perf_monitor
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 MIN_MONITOR_INTERVAL_SECONDS = 30 * 60
@@ -296,6 +301,33 @@ def monitor_top_items(monitor_id: int):
         get_recent_items(monitor_id, limit=10),
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
+
+
+# ── Performance & Bottleneck Monitoring ──────────────────────────────────────
+
+
+@router.get("/performance")
+def get_performance_metrics():
+    """Returns runtime spent across web_scraping, db_write, db_read, time_sleep, and bottleneck analysis."""
+    return JSONResponse(
+        perf_monitor.get_stats(),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@router.get("/performance/report", response_class=HTMLResponse)
+def get_performance_report():
+    """Returns human-readable text report of performance metrics and bottlenecks."""
+    report = perf_monitor.get_summary_text()
+    html = f"<pre style='font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 24px; border-radius: 8px; line-height: 1.5;'>{report}</pre>"
+    return HTMLResponse(html)
+
+
+@router.post("/performance/reset")
+def reset_performance_metrics():
+    """Resets cumulative performance statistics."""
+    perf_monitor.reset()
+    return {"message": "Performance metrics reset successfully"}
 
 
 # ── HTML helpers ─────────────────────────────────────────────────────────────
