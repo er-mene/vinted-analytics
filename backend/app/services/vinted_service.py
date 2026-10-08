@@ -499,11 +499,6 @@ def extract_upload_date(html: str) -> str | None:
 
 def _get_item_status_data(html: str) -> dict:
     data = {}
-    can_buy_matches = re.findall(r'can_buy[\"\\\s]*:\s*(true|false)', html)
-    if can_buy_matches:
-        data["can_buy"] = any(m == "true" for m in can_buy_matches)
-        data["all_cannot_buy"] = all(m == "false" for m in can_buy_matches)
-
     is_closed_matches = re.findall(r'is_closed[\"\\\s]*:\s*(true|false)', html)
     if is_closed_matches:
         data["is_closed"] = any(m == "true" for m in is_closed_matches)
@@ -570,28 +565,37 @@ def check_item_status(url: str) -> ItemVerificationResult:
         logger.debug(f"Item status for {url} resolved to {status.value} (listed_at: {listed_at})")
         return ItemVerificationResult(status, listed_at=listed_at, upload_date_raw=upload_date_raw)
 
-    # 1. Definite ACTIVE signals: Buy button exists
+    # 1. Definite ACTIVE signals: Buy button or make offer button exists
     if soup.find(attrs={"data-testid": "item-buy-button"}):
         return _resolved(ItemStatus.ACTIVE)
+    if soup.find(attrs={"data-testid": "item-buyer-offer-button"}):
+        return _resolved(ItemStatus.ACTIVE)
 
-    # 2. Status banners / badges in HTML (e.g. green 'web_ui__Cell__success' badge)
+    # 2. Status banners / badges in HTML (e.g. green 'web_ui__Cell__success' badge, sidebar cell)
     success_cells = soup.find_all(class_=lambda x: x and "web_ui__Cell__success" in x)
     for cell in success_cells:
         txt = cell.get_text(strip=True).lower()
         if any(w in txt for w in SOLD_STATUS_KEYWORDS) or any(w in txt for w in RESERVED_STATUS_KEYWORDS):
             return _resolved(ItemStatus.SOLD)
 
-    # Legacy or specific data-testid
     if soup.find(attrs={"data-testid": "item-status-content"}):
         return _resolved(ItemStatus.SOLD)
 
-    # Status elements in sidebar / badges
     for el in soup.find_all(["div", "span", "p"], class_=lambda x: x and any(c in x for c in ["Cell", "status", "Badge", "badge", "banner"])):
         txt = el.get_text(strip=True).lower()
         if txt in SOLD_STATUS_KEYWORDS or txt in RESERVED_STATUS_KEYWORDS:
             return _resolved(ItemStatus.SOLD)
 
-    # 3. Check JSON state embedded in the page
+    # 3. Check buyer_item_status in RSC flight payload
+    buyer_status_matches = re.findall(r'\"name\":\"buyer_item_status\".*?\"title\":\"([^\"]+)\"', html)
+    if not buyer_status_matches:
+        buyer_status_matches = re.findall(r'\"title\":\"([^\"]+)\".*?\"name\":\"buyer_item_status\"', html)
+    for title in buyer_status_matches:
+        title_lower = title.strip().lower()
+        if title_lower in SOLD_STATUS_KEYWORDS or title_lower in RESERVED_STATUS_KEYWORDS:
+            return _resolved(ItemStatus.SOLD)
+
+    # 4. Check JSON state embedded in the page
     item_data = _get_item_status_data(html)
 
     if item_data.get("item_closing_action") == "sold":
@@ -602,17 +606,27 @@ def check_item_status(url: str) -> ItemVerificationResult:
     if item_data.get("is_closed") or item_data.get("is_reserved"):
         return _resolved(ItemStatus.SOLD)
 
-    if item_data.get("all_cannot_buy"):
-        return _resolved(ItemStatus.SOLD)
+    # 5. Check for removed banners or messages
+    body_text = soup.get_text().lower()
+    REMOVED_KEYWORDS = (
+        "non è più disponibile", "no longer available", "plus disponible",
+        "nicht mehr verfügbar", "ya no está disponible", "eliminato", "deleted",
+        "rimosso", "supprimé", "gelöscht"
+    )
+    if any(rm in body_text for rm in REMOVED_KEYWORDS):
+        return _resolved(ItemStatus.REMOVED)
 
-    # 4. Secondary active signals
-    if soup.find(attrs={"data-testid": "item-buyer-offer-button"}):
+    # 6. Active indicators: valid page with price, status or title
+    has_price = bool(soup.find(attrs={"data-testid": "item-price"}) or re.search(r'itemProp=[\"\']price[\"\']', html))
+    has_status = bool(soup.find(attrs={"data-testid": "item-attributes-status"}))
+    has_title = bool(soup.title and soup.title.string and "vinted" in soup.title.string.lower())
+
+    if has_price and (has_status or has_title):
         return _resolved(ItemStatus.ACTIVE)
 
-    if item_data.get("can_buy") is True:
+    if has_title:
         return _resolved(ItemStatus.ACTIVE)
 
-    # 5. If no buy buttons exist and can_buy is not True, the item is not purchasable
-    return _resolved(ItemStatus.SOLD)
+    return _resolved(ItemStatus.ERROR)
 
     

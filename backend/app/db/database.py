@@ -175,23 +175,40 @@ def get_monitors_list():
 def get_active_positions_for_monitor(monitor_id: int) -> dict[int, dict]:
     conn = get_db_connection()
     cursor = conn.cursor()
+    cursor.execute("SELECT min_price, max_price, status_ids FROM monitors WHERE id = ?", (monitor_id,))
+    mon_row = cursor.fetchone()
+    min_price = mon_row[0] if mon_row else None
+    max_price = mon_row[1] if mon_row else None
+    status_ids = json.loads(mon_row[2]) if mon_row and mon_row[2] else []
+
     cursor.execute("""
-        SELECT id, scrape_position, price, last_seen_at, has_been_promoted, consecutive_misses
+        SELECT id, scrape_position, price, last_seen_at, has_been_promoted, consecutive_misses, status_id
         FROM listings
         WHERE monitor_id = ? AND is_active = 1
     """, (monitor_id,))
     rows = cursor.fetchall()
     conn.close()
-    return {
-        row[0]: {
+
+    res = {}
+    for row in rows:
+        p_price = row[2]
+        p_status = row[6]
+        # Skip listings that do not match the monitor's current filter criteria
+        if min_price is not None and p_price is not None and p_price < min_price:
+            continue
+        if max_price is not None and p_price is not None and p_price > max_price:
+            continue
+        if status_ids and p_status is not None and p_status not in status_ids:
+            continue
+
+        res[row[0]] = {
             "position": row[1],
-            "price": row[2],
+            "price": p_price,
             "last_seen_at": row[3],
             "has_been_promoted": row[4] or 0,
             "consecutive_misses": row[5] or 0,
         }
-        for row in rows
-    }
+    return res
 
 
 # Configuration for absence confirmation and queueing
@@ -357,17 +374,8 @@ def save_listings(monitor_id: int, items: list, max_pages: int | None = None) ->
         )
 
         if pivot >= 0 and p is not None and p <= pivot:
-            is_confirmed = (misses >= MISS_CONFIRMATION_THRESHOLD)
-            if not is_confirmed and last_seen_at:
-                try:
-                    dt = datetime.strptime(last_seen_at, "%Y-%m-%d %H:%M:%S")
-                    hours_absent = (datetime.now() - dt).total_seconds() / 3600.0
-                    if hours_absent >= MISS_HOURS_THRESHOLD:
-                        is_confirmed = True
-                except Exception:
-                    pass
-
-            if is_confirmed:
+            # Strictly require consecutive misses across monitor scrapes
+            if misses >= MISS_CONFIRMATION_THRESHOLD:
                 immediate.append(prev_id)
         else:
             deferred.append(prev_id)
