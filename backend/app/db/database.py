@@ -73,6 +73,14 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_listings_monitor_active ON listings(monitor_id, is_active)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_queue_last_check ON verification_queue(last_check)
+    ''')
+
     conn.commit()
     conn.close()
 
