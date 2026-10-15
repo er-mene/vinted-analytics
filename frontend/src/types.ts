@@ -39,6 +39,7 @@ export interface QueueItem {
   id: number;
   url: string;
   queued_at: string;
+  scheduled_at?: string | null;
   last_check: string;
   title: string | null;
   brand: string | null;
@@ -51,6 +52,8 @@ export interface QueueItem {
 
 export interface QueueSummary {
   total: number;
+  ready?: number;
+  next_scheduled?: string | null;
   oldest_queued: string | null;
 }
 

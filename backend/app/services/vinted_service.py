@@ -151,7 +151,7 @@ def search_vinted(
     page_delay_seconds: float = DEFAULT_PAGE_DELAY_SECONDS,
     search_time_seconds: int = 5184000,
     progress_callback=None,
-    order: str = "newest_first",
+    order: str = "relevance",
     stop_event: Optional[threading.Event] = None,
 ):
     if stop_event and stop_event.is_set():

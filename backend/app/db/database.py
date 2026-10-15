@@ -82,10 +82,16 @@ def init_db():
         CREATE TABLE IF NOT EXISTS verification_queue (
             id INTEGER PRIMARY KEY REFERENCES listings(id) ON DELETE CASCADE,
             url TEXT UNIQUE,
-            queued_at TIMESTAMP,
+            queued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            scheduled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_check TIMESTAMP
         )
     ''')
+
+    try:
+        cursor.execute("ALTER TABLE verification_queue ADD COLUMN scheduled_at TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass
 
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_listings_monitor_active ON listings(monitor_id, is_active)
@@ -93,6 +99,10 @@ def init_db():
 
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_queue_last_check ON verification_queue(last_check)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_queue_scheduled_at ON verification_queue(scheduled_at)
     ''')
 
     conn.commit()
@@ -302,6 +312,27 @@ def _calculate_scrape_pivot(
     return pivot
 
 
+def calculate_schedule_delay_hours(position: int) -> float:
+    """
+    Tiered verification delay based on listing position in search:
+    - Positions 0-9 (Top 10 hottest): 6 hours
+    - Positions 10-29 (Page 1 top): 12 hours
+    - Positions 30-47 (Page 1 bottom): 18 hours
+    - Positions 48-95 (Page 2): 24 hours
+    - Positions 96+ (Page 3+): 36 hours
+    """
+    if position < 10:
+        return 6.0
+    elif position < 30:
+        return 12.0
+    elif position < 48:
+        return 18.0
+    elif position < 96:
+        return 24.0
+    else:
+        return 36.0
+
+
 def save_listings(monitor_id: int, items: list, max_pages: int | None = None) -> int:
     if not items:
         return 0
@@ -322,19 +353,9 @@ def save_listings(monitor_id: int, items: list, max_pages: int | None = None) ->
         conn.close()
         return 0
 
-    prev_data = get_active_positions_for_monitor(monitor_id)
-    new_ids_set = {item["id"] for item in items}
     new_count = 0
 
-    # Clean up verification_queue for any listings that reappeared in the current scrape (false positives)
-    if new_ids_set:
-        ph = ", ".join(["?"] * len(new_ids_set))
-        cursor.execute(f"DELETE FROM verification_queue WHERE id IN ({ph})", list(new_ids_set))
-
-    # Calculate depth watermark (pivot) using organic, non-promoted anchor items
-    pivot = _calculate_scrape_pivot(items, prev_data, max_pages)
-
-    # Save listings with their scrape position and reset consecutive_misses to 0
+    # Save listings with scrape position and schedule verification based on position tier
     for position, item in enumerate(items):
         cursor.execute("""
             INSERT INTO listings
@@ -357,51 +378,14 @@ def save_listings(monitor_id: int, items: list, max_pages: int | None = None) ->
         if cursor.rowcount > 0:
             new_count += 1
 
-    immediate = []
-    deferred = []
-
-    for prev_id, info in prev_data.items():
-        if prev_id in new_ids_set:
-            continue
-
-        p = info["position"]
-        last_seen_at = info.get("last_seen_at")
-        misses = info.get("consecutive_misses", 0) + 1
-
-        cursor.execute(
-            "UPDATE listings SET consecutive_misses = ? WHERE id = ? AND monitor_id = ?",
-            (misses, prev_id, monitor_id)
-        )
-
-        if pivot >= 0 and p is not None and p <= pivot:
-            # Strictly require consecutive misses across monitor scrapes
-            if misses >= MISS_CONFIRMATION_THRESHOLD:
-                immediate.append(prev_id)
-        else:
-            deferred.append(prev_id)
-
-    # Enqueue immediate items (within pivot, confirmed absent)
-    if immediate:
-        ph = ", ".join(["?"] * len(immediate))
-        cursor.execute(f"""
-            INSERT INTO verification_queue(id, url, queued_at, last_check)
-            SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-            FROM listings
-            WHERE id IN ({ph})
-            ON CONFLICT(id) DO NOTHING
-        """, immediate)
-
-    # Enqueue deferred items (past pivot or unanchored) only if absent for threshold days
-    if deferred:
-        ph = ", ".join(["?"] * len(deferred))
-        cursor.execute(f"""
-            INSERT INTO verification_queue(id, url, queued_at, last_check)
-            SELECT id, url, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-            FROM listings
-            WHERE id IN ({ph})
-            AND (julianday('now') - julianday(last_seen_at)) >= ?
-            ON CONFLICT(id) DO NOTHING
-        """, deferred + [QUEUE_ZOMBIE_THRESHOLD_DAYS])
+        delay_hours = calculate_schedule_delay_hours(position)
+        # Insert into queue with scheduled_at, or advance scheduled_at if the item improved position
+        cursor.execute("""
+            INSERT INTO verification_queue (id, url, queued_at, scheduled_at, last_check)
+            VALUES (?, ?, CURRENT_TIMESTAMP, datetime('now', ?), NULL)
+            ON CONFLICT(id) DO UPDATE SET
+                scheduled_at = MIN(COALESCE(verification_queue.scheduled_at, excluded.scheduled_at), excluded.scheduled_at)
+        """, (item["id"], item["url"], f"+{delay_hours:.1f} hours"))
 
     conn.commit()
     conn.close()
@@ -474,7 +458,8 @@ def get_items_to_verify(max_items: int | None = None):
     query = '''
         SELECT id, url
         FROM verification_queue
-        ORDER BY last_check
+        WHERE scheduled_at IS NULL OR scheduled_at <= CURRENT_TIMESTAMP
+        ORDER BY COALESCE(scheduled_at, queued_at) ASC
     '''
     if max_items is not None:
         query += ' LIMIT ?'
@@ -482,20 +467,77 @@ def get_items_to_verify(max_items: int | None = None):
     else:
         cursor.execute(query)
     rows = cursor.fetchall()
-    items = [{"id":row["id"], "url":row["url"]} for row in rows]
+    items = [{"id": row["id"], "url": row["url"]} for row in rows]
     
     if items:
         ids = [item["id"] for item in items]
         placeholders = ', '.join(['?'] * len(ids))
         cursor.execute(f'''
             UPDATE verification_queue
-            SET last_check = CURRENT_TIMESTAMP
+            SET last_check = CURRENT_TIMESTAMP,
+                scheduled_at = datetime('now', '+15 minutes')
             WHERE id IN ({placeholders})
         ''', ids)
     
     conn.commit()
     conn.close()
     return items
+
+
+def reschedule_verification(item_id: int, delay_hours: float = 24.0):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE verification_queue
+        SET scheduled_at = datetime('now', ?),
+            last_check = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (f"+{delay_hours:.1f} hours", item_id))
+    conn.commit()
+    conn.close()
+
+
+def reschedule_or_expire_active_listing(item_id: int, listed_at: str | None = None, delay_hours: float = 24.0) -> bool:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if listed_at:
+        cursor.execute("UPDATE listings SET listed_at = ? WHERE id = ?", (listed_at, item_id))
+
+    cursor.execute("""
+        SELECT l.listed_at, m.max_age
+        FROM listings l
+        LEFT JOIN monitors m ON m.id = l.monitor_id
+        WHERE l.id = ?
+    """, (item_id,))
+    row = cursor.fetchone()
+    item_listed_at = row[0] if row and row[0] is not None else None
+    max_age = row[1] if row and row[1] is not None else 7.0
+
+    is_expired = False
+    if item_listed_at and max_age:
+        try:
+            dt = datetime.strptime(item_listed_at, "%Y-%m-%d %H:%M:%S")
+            age_days = (datetime.now() - dt).total_seconds() / 86400.0
+            if age_days >= max_age:
+                is_expired = True
+        except Exception:
+            pass
+
+    if is_expired:
+        cursor.execute("DELETE FROM verification_queue WHERE id = ?", (item_id,))
+        conn.commit()
+        conn.close()
+        return False
+
+    cursor.execute("""
+        UPDATE verification_queue
+        SET scheduled_at = datetime('now', ?),
+            last_check = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (f"+{delay_hours:.1f} hours", item_id))
+    conn.commit()
+    conn.close()
+    return True
 
 def mark_item_as_sold(item_id: int, listed_at: str | None = None):
     conn = get_db_connection()
@@ -687,10 +729,21 @@ def get_monitors_with_stats():
 def get_verification_queue_summary():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) AS total, MIN(queued_at) AS oldest_queued FROM verification_queue")
+    cursor.execute("""
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN scheduled_at IS NULL OR scheduled_at <= CURRENT_TIMESTAMP THEN 1 ELSE 0 END) AS ready,
+               MIN(scheduled_at) AS next_scheduled,
+               MIN(queued_at) AS oldest_queued
+        FROM verification_queue
+    """)
     row = cursor.fetchone()
     conn.close()
-    return {"total": row[0], "oldest_queued": row[1]}
+    return {
+        "total": row[0] or 0,
+        "ready": row[1] or 0,
+        "next_scheduled": row[2],
+        "oldest_queued": row[3],
+    }
 
 
 def get_verification_queue_items(limit: int | None = None):
@@ -698,13 +751,13 @@ def get_verification_queue_items(limit: int | None = None):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     query = """
-        SELECT vq.id, vq.url, vq.queued_at, vq.last_check,
+        SELECT vq.id, vq.url, vq.queued_at, vq.scheduled_at, vq.last_check,
                l.title, l.brand, l.price, l.is_active, l.sold_at, l.monitor_id,
                m.name AS monitor_name
         FROM verification_queue vq
         LEFT JOIN listings l ON l.id = vq.id
         LEFT JOIN monitors m ON m.id = l.monitor_id
-        ORDER BY vq.last_check ASC
+        ORDER BY COALESCE(vq.scheduled_at, vq.queued_at) ASC
     """
     if limit is not None:
         query += " LIMIT ?"

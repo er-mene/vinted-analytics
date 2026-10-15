@@ -18,6 +18,8 @@ from app.db.database import (
     delete_listing,
     delete_from_queue,
     update_listing_listed_at,
+    reschedule_verification,
+    reschedule_or_expire_active_listing,
 )
 from app.services.vinted_service import search_vinted, check_item_status, ItemStatus
 
@@ -355,12 +357,14 @@ class VintedWorker:
                 mark_item_as_sold(item["id"], listed_at=listed_at)
                 logger.info("Listing %s marked as sold (listed_at: %s).", item["id"], listed_at)
             elif status == ItemStatus.ERROR:
-                logger.warning("Verification failed for listing %s.", item["id"])
+                reschedule_verification(item["id"], delay_hours=2.0)
+                logger.warning("Verification failed for listing %s, rescheduled in 2h.", item["id"])
             elif status == ItemStatus.ACTIVE:
-                if listed_at:
-                    update_listing_listed_at(item["id"], listed_at)
-                delete_from_queue(item["id"])
-                logger.info("Listing %s verified active – removed from queue (listed_at: %s).", item["id"], listed_at)
+                rescheduled = reschedule_or_expire_active_listing(item["id"], listed_at=listed_at, delay_hours=24.0)
+                if rescheduled:
+                    logger.info("Listing %s verified active – rescheduled for next check (+24h).", item["id"])
+                else:
+                    logger.info("Listing %s verified active – reached max age, removed from queue.", item["id"])
             return True
         except Exception:
             logger.exception("Single item verification failed.")

@@ -31,6 +31,7 @@ export default function QueueItemRow({ item }: { item: QueueItem }) {
   const price = item.price !== null ? "€" + Number(item.price).toFixed(2) : "—";
   const mon = item.monitor_name || "—";
   const queued = fmtTime(item.queued_at);
+  const scheduled = item.scheduled_at ? fmtDateTime(item.scheduled_at) : "—";
   const lastCheck = fmtTime(item.last_check);
 
   return (
@@ -49,6 +50,7 @@ export default function QueueItemRow({ item }: { item: QueueItem }) {
       <td className="px-3.5 py-2.5 text-sm font-medium">{price}</td>
       <td className="px-3.5 py-2.5 text-sm text-muted">{mon}</td>
       <td className="px-3.5 py-2.5 text-sm text-muted">{queued}</td>
+      <td className="px-3.5 py-2.5 text-sm text-muted">{scheduled}</td>
       <td className="px-3.5 py-2.5 text-sm text-muted">{lastCheck}</td>
       <td className="px-3.5 py-2.5 text-sm">
         <span
