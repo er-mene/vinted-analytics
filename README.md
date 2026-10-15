@@ -5,11 +5,10 @@ FastAPI service for tracking Vinted search results, storing listing history in S
 ## What It Does
 
 - Creates search monitors for Vinted queries.
-- Runs each monitor on a schedule with APScheduler.
+- Runs each monitor on a schedule with a background worker thread.
 - Stores listings in SQLite.
 - Keeps a background verification queue to detect removed and sold items.
 - Exposes analytics for price history, price/likes correlation, and price/time-to-sell correlation.
-- Includes a built-in dashboard page rendered directly by the API.
 
 ## Current Behavior
 
@@ -22,18 +21,18 @@ FastAPI service for tracking Vinted search results, storing listing history in S
 ## Stack
 
 - FastAPI
-- APScheduler
 - SQLite
 - curl_cffi
 - BeautifulSoup
 
 ## Project Layout
 
-- [backend/main.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/main.py): app startup, scheduler startup, verification worker lifecycle.
-- [backend/app/api/endpoints.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/api/endpoints.py): API routes, monitor scheduling, analytics JSON, dashboard HTML.
+- [backend/main.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/main.py): app startup, worker startup, and lifecycle.
+- [backend/app/api/endpoints.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/api/endpoints.py): API routes, monitor scheduling, analytics JSON.
 - [backend/app/db/database.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/db/database.py): schema creation and all database operations.
 - [backend/app/services/vinted_service.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/services/vinted_service.py): Vinted requests and item status checks.
-- [backend/app/tasks/verification_worker.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/tasks/verification_worker.py): background verification loop.
+- [backend/app/tasks/vinted_worker.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/tasks/vinted_worker.py): background scrape and verification loop.
+- [backend/app/utils/perf_monitor.py](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/backend/app/utils/perf_monitor.py): runtime performance and bottleneck instrumentation.
 - [frontend/](/Users/ermene/projects/vinted%20market%20analyzer/vinted-analytics/frontend/): Vite + React + TypeScript frontend.
 
 ## Database
@@ -85,13 +84,22 @@ All routes are mounted under `/api`.
 | Method | Endpoint | Description |
 | --- | --- | --- |
 | `GET` | `/api/` | List all monitors |
+| `GET` | `/api/overview` | Monitors with stats plus queue summary |
 | `POST` | `/api/monitor` | Create a monitor and schedule it |
+| `PUT` | `/api/monitor/{monitor_id}` | Update one monitor |
 | `PATCH` | `/api/monitor/stop` | Pause one monitor job |
 | `PATCH` | `/api/monitor/resume` | Resume one monitor job |
 | `POST` | `/api/monitor/delete` | Delete one monitor and remove its job |
-| `GET` | `/api/monitor/{monitor_id}/run` | Run one monitor immediately |
+| `GET` | `/api/monitor/{monitor_id}/progress` | Return current scrape progress |
 | `GET` | `/api/monitor/{monitor_id}/analytics` | Return analytics JSON |
-| `GET` | `/api/monitor/{monitor_id}/dashboard` | Show the built-in charts page |
+| `GET` | `/api/monitor/{monitor_id}/listings` | List stored listings for a monitor |
+| `GET` | `/api/monitor/{monitor_id}/top` | Most liked recent listings |
+| `GET` | `/api/queue` | Return verification queue summary and items |
+| `POST` | `/api/queue/clear` | Clear the verification queue |
+| `DELETE` | `/api/queue` | Clear the verification queue |
+| `GET` | `/api/performance` | Return runtime performance metrics |
+| `GET` | `/api/performance/report` | Return a human-readable performance report |
+| `POST` | `/api/performance/reset` | Reset cumulative performance metrics |
 
 ## Analytics
 
@@ -105,7 +113,7 @@ The analytics endpoint currently returns:
   - price vs likes
   - price vs time to sell
 
-The dashboard visualizes:
+The React frontend visualizes:
 
 - price distribution over time
 - price / likes correlation

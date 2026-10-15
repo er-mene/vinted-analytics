@@ -167,13 +167,6 @@ export interface MonitorActionResponse {
   monitor_id: number;
 }
 
-export interface RunMonitorResponse {
-  monitor: string;
-  new_items_found: number;
-  current_avg_price: number;
-  total_active_scraped: number;
-}
-
 export interface ClearQueueResponse {
   message: string;
   deleted?: number;

@@ -182,51 +182,6 @@ def get_monitors_list():
     conn.close()
     return [dict(r) for r in rows]
 
-def get_active_positions_for_monitor(monitor_id: int) -> dict[int, dict]:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT min_price, max_price, status_ids FROM monitors WHERE id = ?", (monitor_id,))
-    mon_row = cursor.fetchone()
-    min_price = mon_row[0] if mon_row else None
-    max_price = mon_row[1] if mon_row else None
-    status_ids = json.loads(mon_row[2]) if mon_row and mon_row[2] else []
-
-    cursor.execute("""
-        SELECT id, scrape_position, price, last_seen_at, has_been_promoted, consecutive_misses, status_id
-        FROM listings
-        WHERE monitor_id = ? AND is_active = 1
-    """, (monitor_id,))
-    rows = cursor.fetchall()
-    conn.close()
-
-    res = {}
-    for row in rows:
-        p_price = row[2]
-        p_status = row[6]
-        # Skip listings that do not match the monitor's current filter criteria
-        if min_price is not None and p_price is not None and p_price < min_price:
-            continue
-        if max_price is not None and p_price is not None and p_price > max_price:
-            continue
-        if status_ids and p_status is not None and p_status not in status_ids:
-            continue
-
-        res[row[0]] = {
-            "position": row[1],
-            "price": p_price,
-            "last_seen_at": row[3],
-            "has_been_promoted": row[4] or 0,
-            "consecutive_misses": row[5] or 0,
-        }
-    return res
-
-
-# Configuration for absence confirmation and queueing
-MISS_CONFIRMATION_THRESHOLD = 2
-MISS_HOURS_THRESHOLD = 3.0
-QUEUE_ZOMBIE_THRESHOLD_DAYS = 2
-
-
 def _is_item_older_than(item: dict, now_ts: float, max_age_seconds: float) -> bool:
     ts = item.get("listed_at_ts")
     if ts is not None:
@@ -239,77 +194,6 @@ def _is_item_older_than(item: dict, now_ts: float, max_age_seconds: float) -> bo
         except Exception:
             pass
     return False
-
-
-def _calculate_scrape_pivot(
-    items: list,
-    prev_data: dict[int, dict],
-    max_pages: int | None = None
-) -> int:
-    """
-    Computes the depth watermark (pivot) in previous scrape positions.
-    Only organic (non-promoted) listings with unchanged prices and consistent
-    downward/monotonic shifts are used as anchors to prevent promoted items
-    or outliers from corrupting the watermark.
-    """
-    if not items or not prev_data:
-        return -1
-
-    curr_item_count = len(items)
-    anchors = []
-
-    for curr_pos, item in enumerate(items):
-        item_id = item["id"]
-        if item_id not in prev_data:
-            continue
-
-        prev_info = prev_data[item_id]
-        # Ignore promoted items in either previous or current scrape
-        if item.get("has_been_promoted") or prev_info.get("has_been_promoted"):
-            continue
-
-        # Ignore items whose price changed (could be bumped/re-ranked)
-        if prev_info["price"] != item["price"]:
-            continue
-
-        old_pos = prev_info.get("position")
-        if old_pos is None:
-            continue
-
-        # Plausibility check: in newest-first feeds, older items shift down (curr_pos >= old_pos).
-        # We allow a small upward drift (up to 15 positions) for deletions ahead of it,
-        # but an item jumping dozens of positions toward the top is an outlier (relisted/bumped).
-        # Also, old_pos cannot be substantially deeper than the total scrape depth.
-        if curr_pos < old_pos - 15:
-            continue
-        if old_pos > curr_item_count + 15:
-            continue
-
-        anchors.append(old_pos)
-
-    if not anchors:
-        # Fallback: check all non-promoted common items with plausible positions
-        for curr_pos, item in enumerate(items):
-            item_id = item["id"]
-            if item_id in prev_data:
-                prev_info = prev_data[item_id]
-                if item.get("has_been_promoted") or prev_info.get("has_been_promoted"):
-                    continue
-                old_pos = prev_info.get("position")
-                if old_pos is not None and curr_pos >= old_pos - 15 and old_pos <= curr_item_count + 15:
-                    anchors.append(old_pos)
-
-    if not anchors:
-        return -1
-
-    pivot = max(anchors)
-
-    # Scrape depth protection: cap pivot to the items actually fetched (+ buffer for deletions)
-    max_allowed_pivot = curr_item_count + 15
-    if pivot > max_allowed_pivot:
-        pivot = max_allowed_pivot
-
-    return pivot
 
 
 def calculate_schedule_delay_hours(position: int) -> float:
@@ -564,19 +448,6 @@ def mark_item_as_sold(item_id: int, listed_at: str | None = None):
     conn.commit()
     conn.close()
 
-def update_listing_listed_at(item_id: int, listed_at: str):
-    if not listed_at:
-        return
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        UPDATE listings
-        SET listed_at = ?
-        WHERE id = ?
-    ''', (listed_at, item_id))
-    conn.commit()
-    conn.close()
-
 def delete_listing(item_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -588,13 +459,6 @@ def delete_listing(item_id: int):
         DELETE FROM listings
         WHERE id = ?
     ''', (item_id,))
-    conn.commit()
-    conn.close()
-
-def delete_from_queue(item_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM verification_queue WHERE id = ?", (item_id,))
     conn.commit()
     conn.close()
 

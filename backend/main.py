@@ -65,5 +65,4 @@ app.include_router(api_router, prefix="/api")
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-setup_access_log_filter()
 

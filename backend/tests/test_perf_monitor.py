@@ -44,23 +44,13 @@ def test_basic_recording_and_stats(monitor):
     assert len(stats["insights"]) > 0
 
 
-def test_context_manager_and_decorator(monitor):
+def test_context_manager(monitor):
     with monitor.track("web_scraping", "test_block"):
         time.sleep(0.01)
-
-    @monitor.measure("db_write", "test_func")
-    def do_work():
-        time.sleep(0.01)
-        return 42
-
-    res = do_work()
-    assert res == 42
 
     stats = monitor.get_stats()
     assert stats["summary"]["web_scraping"]["count"] == 1
     assert stats["summary"]["web_scraping"]["total_seconds"] > 0
-    assert stats["summary"]["db_write"]["count"] == 1
-    assert stats["summary"]["db_write"]["total_seconds"] > 0
 
 
 def test_sleep_and_event_wait_tracking(monitor):

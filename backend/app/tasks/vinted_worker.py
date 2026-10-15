@@ -16,8 +16,6 @@ from app.db.database import (
     mark_item_as_sold,
     clear_queue,
     delete_listing,
-    delete_from_queue,
-    update_listing_listed_at,
     reschedule_verification,
     reschedule_or_expire_active_listing,
 )
@@ -102,10 +100,6 @@ class VintedWorker:
     def get_next_run(self, monitor_id: int) -> Optional[float]:
         with self._lock:
             return self._monitor_next_runs.get(monitor_id)
-
-    def is_monitor_running(self, monitor_id: int) -> bool:
-        with self._lock:
-            return self._current_running_monitor_id == monitor_id
 
     def get_progress(self, monitor_id: int) -> dict:
         with self._lock:

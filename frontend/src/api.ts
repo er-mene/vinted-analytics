@@ -7,7 +7,6 @@ import type {
   MonitorCreatePayload,
   MonitorCreateResponse,
   MonitorActionResponse,
-  RunMonitorResponse,
   ClearQueueResponse,
 } from "./types";
 
@@ -87,12 +86,6 @@ export async function resumeMonitor(id: number): Promise<MonitorActionResponse> 
 
 export async function deleteMonitorFromApi(id: number): Promise<MonitorActionResponse> {
   const res = await fetch(`${BASE}/monitor/delete?monitor_id=${id}`, { method: "POST" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
-export async function runMonitor(id: number): Promise<RunMonitorResponse> {
-  const res = await fetch(`${BASE}/monitor/${id}/run?_=${Date.now()}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

@@ -10,14 +10,13 @@ Tracks runtime spent in:
 """
 
 import collections
-import functools
 import logging
 import re
 import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("perf_monitor")
 
@@ -211,7 +210,6 @@ class BottleneckMonitor:
         self.last_scrape: Optional[dict] = None
         self.recent_scrapes: collections.deque = collections.deque(maxlen=20)
         self._orig_sleep = time.sleep
-        self._is_sleep_patched = False
 
     def reset(self):
         """Resets all cumulative statistics and event history."""
@@ -241,22 +239,6 @@ class BottleneckMonitor:
         """Context manager to measure runtime of a block."""
         return _BlockContext(self, category, name, metadata)
 
-    def measure(self, category: str, name: Optional[str] = None):
-        """Function decorator to measure execution time."""
-        def decorator(func: Callable):
-            op_name = name or func.__name__
-
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs):
-                t0 = time.perf_counter()
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    dt = time.perf_counter() - t0
-                    self.record(category, op_name, dt)
-            return wrapper
-        return decorator
-
     def sleep(self, seconds: float, name: str = "time.sleep", category: str = "time_sleep", metadata: Optional[dict] = None) -> float:
         """Executes time.sleep and accurately logs the idle sleep time."""
         t0 = time.perf_counter()
@@ -283,21 +265,6 @@ class BottleneckMonitor:
     def track_scrape(self, monitor_id: int, monitor_name: str) -> ScrapeRunContext:
         """Returns a ScrapeRunContext to trace a complete monitor scrape execution."""
         return ScrapeRunContext(self, monitor_id, monitor_name)
-
-    def patch_time_sleep(self):
-        """Patches time.sleep globally to record uninstrumented sleeps automatically."""
-        if self._is_sleep_patched:
-            return
-        orig_sleep = self._orig_sleep
-
-        def patched_sleep(seconds):
-            t0 = time.perf_counter()
-            orig_sleep(seconds)
-            dt = time.perf_counter() - t0
-            self.record("time_sleep", "generic_sleep", dt)
-
-        time.sleep = patched_sleep
-        self._is_sleep_patched = True
 
     # ── Analytics & Statistics ────────────────────────────────────────────────
 

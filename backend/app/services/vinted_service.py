@@ -340,10 +340,6 @@ def search_vinted(
     return clean_items
 
 
-# Alias to support both names
-vinted_search = search_vinted
-
-
 class ItemStatus(Enum):
     ACTIVE = "active"
     SOLD = "sold"
@@ -356,9 +352,6 @@ class ItemVerificationResult:
         self.status = status
         self.listed_at = listed_at
         self.upload_date_raw = upload_date_raw
-
-    def __iter__(self):
-        return iter((self.status, self.listed_at))
 
     def __eq__(self, other):
         if isinstance(other, ItemStatus):

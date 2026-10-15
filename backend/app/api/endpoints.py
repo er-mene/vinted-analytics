@@ -1,9 +1,7 @@
-from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
-import json
 import logging
 from datetime import datetime, timezone
 from app.db.database import (
@@ -11,7 +9,6 @@ from app.db.database import (
     get_monitor,
     update_monitor,
     set_monitor_active,
-    save_listings,
     get_monitors_list,
     delete_monitor,
     get_monitor_analytics,
@@ -21,9 +18,7 @@ from app.db.database import (
     clear_verification_queue,
     get_recent_items,
     get_listings,
-    update_monitor_last_scrape,
 )
-from app.services.vinted_service import search_vinted
 from app.tasks.vinted_worker import vinted_worker
 
 try:
@@ -65,13 +60,6 @@ def _pearson_correlation(points: List[tuple[float, float]]) -> Optional[float]:
         return None
     return round(numerator / (denominator_x * denominator_y), 4)
 
-
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
-
-
-def _build_dashboard_html(monitor_id: int) -> str:
-    template = (TEMPLATES_DIR / "monitor_dashboard.html").read_text(encoding="utf-8")
-    return template.replace("{{monitor_id}}", str(monitor_id))
 
 class MonitorCreate(BaseModel):
     name: str
@@ -149,14 +137,6 @@ def resume_monitor(monitor_id: int):
     vinted_worker.on_monitor_updated(monitor_id)
     return {"message": "Monitor resumed", "monitor_id": monitor_id}
 
-@router.get("/monitor/{monitor_id}/run")
-def run_monitor(monitor_id: int):
-    return JSONResponse(
-        {"message": "Manual runs are disabled in scheduled queue mode. Monitors run automatically on schedule."},
-        status_code=400,
-    )
-
-
 @router.get("/monitor/{monitor_id}/progress")
 def monitor_progress(monitor_id: int):
     return vinted_worker.get_progress(monitor_id)
@@ -194,12 +174,6 @@ def monitor_listings(monitor_id: int, sort_by: str = "likes", order: str = "desc
         get_listings(monitor_id, sort_by=sort_by, order=order, limit=limit, offset=offset),
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
-
-@router.get("/monitor/{monitor_id}/dashboard", response_class=HTMLResponse)
-def monitor_dashboard(monitor_id: int):
-    if not get_monitor(monitor_id):
-        raise HTTPException(status_code=404, detail="Monitor not found")
-    return HTMLResponse(_build_dashboard_html(monitor_id))
 
 @router.post("/monitor/delete")
 def delete_monitor_from_db(monitor_id: int):
@@ -328,27 +302,3 @@ def reset_performance_metrics():
     """Resets cumulative performance statistics."""
     perf_monitor.reset()
     return {"message": "Performance metrics reset successfully"}
-
-
-# ── HTML helpers ─────────────────────────────────────────────────────────────
-
-
-def _build_overview_html() -> str:
-    return (TEMPLATES_DIR / "overview_dashboard.html").read_text(encoding="utf-8")
-
-
-def _build_queue_html() -> str:
-    return (TEMPLATES_DIR / "queue_dashboard.html").read_text(encoding="utf-8")
-
-
-# ── HTML endpoints ───────────────────────────────────────────────────────────
-
-
-@router.get("/dashboard", response_class=HTMLResponse)
-def dashboard():
-    return HTMLResponse(_build_overview_html())
-
-
-@router.get("/queue/dashboard", response_class=HTMLResponse)
-def queue_dashboard():
-    return HTMLResponse(_build_queue_html())
