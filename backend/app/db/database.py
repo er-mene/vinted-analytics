@@ -2,7 +2,7 @@ import os
 import sqlite3
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_NAME = os.path.join(BACKEND_DIR, "vinted_data.db")
@@ -234,7 +234,7 @@ def _is_item_older_than(item: dict, now_ts: float, max_age_seconds: float) -> bo
     listed_at_str = item.get("listed_at")
     if listed_at_str:
         try:
-            dt = datetime.strptime(listed_at_str, "%Y-%m-%d %H:%M:%S")
+            dt = datetime.strptime(listed_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             return (now_ts - dt.timestamp()) > max_age_seconds
         except Exception:
             pass
@@ -516,8 +516,8 @@ def reschedule_or_expire_active_listing(item_id: int, listed_at: str | None = No
     is_expired = False
     if item_listed_at and max_age:
         try:
-            dt = datetime.strptime(item_listed_at, "%Y-%m-%d %H:%M:%S")
-            age_days = (datetime.now() - dt).total_seconds() / 86400.0
+            dt = datetime.strptime(item_listed_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
             if age_days >= max_age:
                 is_expired = True
         except Exception:

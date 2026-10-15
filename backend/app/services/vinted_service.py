@@ -6,7 +6,7 @@ import threading
 from enum import Enum
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import Timeout, RequestException
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from bs4 import BeautifulSoup
 
@@ -93,10 +93,10 @@ def _parse_item(item):
     unix_time = high_res.get("timestamp")
 
     if unix_time:
-        listing_date = datetime.fromtimestamp(unix_time).strftime("%Y-%m-%d %H:%M:%S")
+        listing_date = datetime.fromtimestamp(unix_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     else:
         unix_time = int(time.time())
-        listing_date = datetime.fromtimestamp(unix_time).strftime("%Y-%m-%d %H:%M:%S")
+        listing_date = datetime.fromtimestamp(unix_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     brand = item.get("brand_title")
     item_box = item.get("item_box") or {}
@@ -388,7 +388,7 @@ def parse_relative_date(date_str: str, now: datetime = None) -> datetime | None:
     if not date_str:
         return None
     if now is None:
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
 
     text = date_str.strip().lower()
 
